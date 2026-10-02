@@ -2,6 +2,7 @@ import os
 import shutil
 import tempfile
 import traceback
+from typing import Optional
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -82,17 +83,24 @@ def get_stats():
 
 @app.get("/api/suspicious")
 @app.get("/suspicious")
-def get_suspicious(limit: int = Query(50, ge=1, le=200, description="Max flagged accounts to return")):
+def get_suspicious(
+    page: int = Query(1, ge=1, description="Page number (1-indexed)"),
+    limit: int = Query(50, ge=1, le=500, description="Items per page"),
+    search: Optional[str] = Query(None, description="Optional search filter for account, device, or IP"),
+):
     """
-    Auto-detects flagged suspicious money laundering hub accounts.
-    Analyzes fan-in concentration, outbound smurfing velocity, and turnover wash ratios.
+    Auto-detects flagged suspicious money laundering hub accounts with pagination.
+    Analyzes device anomalies, IP anomalies, structuring threshold evasion, and nocturnal timing.
     """
     try:
-        data = database.get_suspicious_accounts(limit=limit)
+        result = database.get_suspicious_accounts(page=page, limit=limit, search=search)
         return {
             "status": "ok",
-            "count": len(data),
-            "data": data,
+            "total_rows": result["total_rows"],
+            "page": result["page"],
+            "limit": result["limit"],
+            "total_pages": result["total_pages"],
+            "data": result["data"],
         }
     except Exception as e:
         traceback.print_exc()
@@ -195,13 +203,11 @@ async def upload_csv(file: UploadFile = File(...)):
             status_code=200,
             content={
                 "status": "success",
-                "message": f"Successfully ingested {result['row_count']:,} transactions into DuckDB",
+                "message": f"Successfully ingested {result['row_count']:,} transactions in {result.get('elapsed_sec', 0)}s",
                 "filename": file.filename,
                 "rows_ingested": result["row_count"],
-                "columns": result["columns"],
-                "detected_mapping": result.get("detected_mapping", {}),
-                "preview": result["preview"],
-                "stats": result.get("stats", {}),
+                "elapsed_sec": result.get("elapsed_sec", 0),
+                "columns": result.get("columns", []),
             },
         )
 
@@ -219,3 +225,14 @@ async def upload_csv(file: UploadFile = File(...)):
                 os.remove(temp_file_path)
             except Exception as cleanup_err:
                 print(f"Warning: Failed to delete temp file {temp_file_path}: {cleanup_err}")
+
+
+@app.delete("/api/reset")
+@app.post("/api/reset")
+def reset_database():
+    """Clear Space: Drops the transactions table and caches to free up memory."""
+    try:
+        return database.reset_db()
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to reset database: {str(e)}")

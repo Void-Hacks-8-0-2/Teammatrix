@@ -11,8 +11,10 @@
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",
+    "@types/papaparse": "^5.5.2",
     "jspdf": "^4.2.1",
     "lucide-react": "^1.49.0",
+    "papaparse": "^5.7.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-force-graph-2d": "^1.29.2",

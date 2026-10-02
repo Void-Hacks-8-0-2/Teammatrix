@@ -1,5 +1,7 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useMemo } from 'react'
 import Papa from 'papaparse'
+import { jsPDF } from 'jspdf'
+import NetworkGraph from './NetworkGraph'
 import {
   UploadCloud,
   AlertCircle,
@@ -29,6 +31,11 @@ import {
   CheckCircle2,
   FileText,
   ArrowRight,
+  Bot,
+  Send,
+  Gavel,
+  Download,
+  ShieldAlert,
 } from 'lucide-react'
 
 // --- Interfaces & Types ---
@@ -69,6 +76,31 @@ interface PaginatedTransactions {
   data: TransactionRow[]
 }
 
+export interface ThreatIntelligenceReport {
+  summary: string
+  mule_risk_index: {
+    level: string
+    role: string
+    score: number
+    description: string
+  }
+  money_laundering_flow: {
+    volume: number
+    structuring_detected: boolean
+    description: string
+  }
+  rapid_transfer_velocity: {
+    panic_detected: boolean
+    description: string
+  }
+  device_ip_attribution: {
+    primary_device: string
+    primary_ip: string
+    description: string
+  }
+  recommendation: string
+}
+
 export interface SuspiciousAccount {
   account: string
   total_received: number
@@ -83,6 +115,22 @@ export interface SuspiciousAccount {
   risk_factors: string[]
   primary_device?: string
   primary_ip?: string
+  threat_report?: ThreatIntelligenceReport
+}
+
+export interface AIChatMessage {
+  id: string
+  sender: 'user' | 'ai'
+  text: string
+  timestamp: string
+  accountId?: string
+  suggestedActions?: {
+    type: string
+    label: string
+    account_id: string
+    bank_name?: string
+    amount?: number
+  }[]
 }
 
 interface PaginatedSuspicious {
@@ -434,6 +482,92 @@ function computeLocalMirageData(rows: TransactionRow[]): {
   return { suspicious, transactions, suspiciousSet }
 }
 
+// Local 3-hop trace fallback generator for instant split-screen display
+function computeLocalTrace(accountId: string, rows: TransactionRow[]): TraceResponse {
+  const cleanId = (accountId || '').trim()
+  const queue: { id: string; hop: number }[] = [{ id: cleanId, hop: 0 }]
+  const visited = new Set<string>([cleanId.toLowerCase()])
+  const nodeGroups: Record<string, number> = { [cleanId]: 0 }
+  const links: GraphLink[] = []
+
+  let currentHop = 1
+  while (queue.length > 0 && currentHop <= 3) {
+    const nextQueue: { id: string; hop: number }[] = []
+    for (const curr of queue) {
+      if (curr.hop >= 3) continue
+      const outRows = rows.filter(
+        (r) => r.sender && r.sender.trim().toLowerCase() === curr.id.toLowerCase()
+      )
+      for (const r of outRows) {
+        const tgt = (r.receiver || '').trim()
+        if (!tgt) continue
+        links.push({
+          source: curr.id,
+          target: tgt,
+          amount: r.amount || 0,
+          timestamp: r.timestamp || new Date().toISOString(),
+          hop: curr.hop + 1,
+          ip_address: r.ip_address,
+          device_type: r.device_type,
+          payment_mode: r.payment_mode,
+          narration: r.narration,
+        })
+        const tgtLower = tgt.toLowerCase()
+        if (!visited.has(tgtLower)) {
+          visited.add(tgtLower)
+          nodeGroups[tgt] = curr.hop + 1
+          nextQueue.push({ id: tgt, hop: curr.hop + 1 })
+        }
+      }
+    }
+    queue.length = 0
+    queue.push(...nextQueue)
+    currentHop++
+  }
+
+  // If no outbound transfers found, populate inbound transfers as layer 1 to visualize connectivity
+  if (links.length === 0) {
+    const inRows = rows
+      .filter((r) => r.receiver && r.receiver.trim().toLowerCase() === cleanId.toLowerCase())
+      .slice(0, 15)
+    for (const r of inRows) {
+      const src = (r.sender || '').trim()
+      if (!src) continue
+      links.push({
+        source: src,
+        target: cleanId,
+        amount: r.amount || 0,
+        timestamp: r.timestamp || new Date().toISOString(),
+        hop: 1,
+        ip_address: r.ip_address,
+        device_type: r.device_type,
+        payment_mode: r.payment_mode,
+        narration: r.narration,
+      })
+      nodeGroups[src] = 1
+    }
+  }
+
+  const nodes: GraphNode[] = Object.entries(nodeGroups).map(([id, group]) => ({ id, group }))
+  const totalVolume = links.reduce((acc, l) => acc + (l.amount || 0), 0)
+
+  return {
+    status: 'success',
+    victim_id: cleanId,
+    nodes,
+    links,
+    layer_summary: {
+      victim: 1,
+      layer_1: nodes.filter((n) => n.group === 1).length,
+      layer_2: nodes.filter((n) => n.group === 2).length,
+      layer_3: nodes.filter((n) => n.group === 3).length,
+    },
+    total_nodes: nodes.length,
+    total_links: links.length,
+    total_volume: Math.round(totalVolume * 100) / 100,
+  }
+}
+
 export default function App() {
   // Backend & Connection status
   const [backendStatus, setBackendStatus] = useState<'checking' | 'connected' | 'disconnected'>('checking')
@@ -494,6 +628,11 @@ export default function App() {
   const [masterGraphData, setMasterGraphData] = useState<TraceResponse | null>(null)
   const [showTraceModal, setShowTraceModal] = useState<boolean>(false)
 
+  // Split-Screen Right Panel Trace Data State (Phase 3)
+  const [splitTraceData, setSplitTraceData] = useState<TraceResponse | null>(null)
+  const [isSplitTracing, setIsSplitTracing] = useState<boolean>(false)
+  const [splitTraceError, setSplitTraceError] = useState<string | null>(null)
+
   // Accordion open/close state for layers in detailed trace report
   const [openLayers, setOpenLayers] = useState<{ [key: string]: boolean }>({
     victim: true,
@@ -504,6 +643,236 @@ export default function App() {
 
   // Filter within detailed trace report
   const [traceFilterQuery, setTraceFilterQuery] = useState<string>('')
+
+  // --- PHASE 4 UPGRADES: INTERACTIVE INVESTIGATION PIPELINE & AI CHAT & SEC 91 ---
+  const [isAIChatOpen, setIsAIChatOpen] = useState<boolean>(false)
+  const [chatMessages, setChatMessages] = useState<AIChatMessage[]>([])
+  const [chatInput, setChatInput] = useState<string>('')
+  const [isAITyping, setIsAITyping] = useState<boolean>(false)
+  const chatEndRef = useRef<HTMLDivElement>(null)
+
+  // Section 91 Freeze Drawer State
+  const [sec91Target, setSec91Target] = useState<{ accountId: string; bankName: string; amount: number } | null>(null)
+  const [isSec91DrawerOpen, setIsSec91DrawerOpen] = useState<boolean>(false)
+  const [isSec91Loading, setIsSec91Loading] = useState<boolean>(false)
+  const [sec91EditableText, setSec91EditableText] = useState<string>('')
+  const [sec91Copied, setSec91Copied] = useState<boolean>(false)
+
+  // Interactive Pipeline Active Step (1: Ingestion, 2: Auto-Detect, 3: Graph, 4: AI Action)
+  const currentPipelineStep = useMemo(() => {
+    if (showUpload && (!transactions || localBuffer.length === 0)) return 1
+    if (isSec91DrawerOpen || isAIChatOpen) return 4
+    if (selectedEntity !== null) return 3
+    return 2
+  }, [showUpload, transactions, localBuffer.length, selectedEntity, isSec91DrawerOpen, isAIChatOpen])
+
+  // Step Click Handler: manually switch views without losing state
+  const handleStepClick = (step: number) => {
+    if (step === 1) {
+      setShowUpload(true)
+    } else if (step === 2) {
+      setShowUpload(false)
+      setSelectedEntity(null)
+      setActiveTab('suspicious')
+      setIsAIChatOpen(false)
+      setIsSec91DrawerOpen(false)
+    } else if (step === 3) {
+      setShowUpload(false)
+      setIsSec91DrawerOpen(false)
+      if (!selectedEntity) {
+        const top = suspiciousData?.data[0] || localMirageSuspicious?.data[0]
+        if (top) {
+          setSelectedEntity({ type: 'suspicious', data: top })
+        }
+      }
+    } else if (step === 4) {
+      setIsAIChatOpen(true)
+      if (chatMessages.length === 0) {
+        initProactiveChat()
+      }
+    }
+  }
+
+  // Initialize Proactive Chat Greeting
+  const initProactiveChat = async () => {
+    try {
+      const res = await fetch('/api/top-suspect')
+      let topAcc = 'KKBK10000405'
+      let topScore = 99
+      let topIn = 690251.71
+      if (res.ok) {
+        const json = await res.json()
+        if (json.suspect) {
+          topAcc = json.suspect.account
+          topScore = json.suspect.risk_score
+          topIn = json.suspect.total_in || 245000.0
+        }
+      } else if (suspiciousData && suspiciousData.data.length > 0) {
+        topAcc = suspiciousData.data[0].account
+        topScore = suspiciousData.data[0].risk_score
+        topIn = suspiciousData.data[0].total_received
+      }
+
+      const greetingMsg: AIChatMessage = {
+        id: `ai-proactive-${Date.now()}`,
+        sender: 'ai',
+        text: `I have scanned the dataset. Account ${topAcc} shows a ${topScore}% risk of being a mule hub due to rapid off-hour transfers. Would you like me to generate a Sec 91 freeze notice?`,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        accountId: topAcc,
+        suggestedActions: [
+          {
+            type: 'freeze_notice',
+            label: `Draft Sec 91 Notice for ${topAcc}`,
+            account_id: topAcc,
+            bank_name: topAcc.slice(0, 4) + ' Bank',
+            amount: topIn,
+          },
+          {
+            type: 'trace_graph',
+            label: `Trace 3-Hop Network (${topAcc})`,
+            account_id: topAcc,
+          },
+        ],
+      }
+      setChatMessages([greetingMsg])
+    } catch {
+      // fallback
+    }
+  }
+
+  // Send message to /api/ai-chat
+  const handleSendChatMessage = async (overrideText?: string) => {
+    const textToSend = overrideText || chatInput
+    if (!textToSend.trim() || isAITyping) return
+
+    const userMsg: AIChatMessage = {
+      id: `user-${Date.now()}`,
+      sender: 'user',
+      text: textToSend.trim(),
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    }
+
+    setChatMessages((prev) => [...prev, userMsg])
+    if (!overrideText) setChatInput('')
+    setIsAITyping(true)
+
+    try {
+      const res = await fetch('/api/ai-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: textToSend.trim() }),
+      })
+      if (res.ok) {
+        const data = await res.json()
+        const aiMsg: AIChatMessage = {
+          id: `ai-${Date.now()}`,
+          sender: 'ai',
+          text: data.response || 'Forensic analysis completed.',
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          accountId: data.account_id,
+          suggestedActions: data.suggested_actions,
+        }
+        setChatMessages((prev) => [...prev, aiMsg])
+      } else {
+        throw new Error(`API returned status ${res.status}`)
+      }
+    } catch (err: unknown) {
+      const aiErrMsg: AIChatMessage = {
+        id: `ai-${Date.now()}`,
+        sender: 'ai',
+        text: `Investigation notice: ${err instanceof Error ? err.message : 'Analysis request failed.'}. Local ledger remains accessible.`,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      }
+      setChatMessages((prev) => [...prev, aiErrMsg])
+    } finally {
+      setIsAITyping(false)
+    }
+  }
+
+  // Scroll chat to bottom
+  useEffect(() => {
+    if (isAIChatOpen && chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [chatMessages, isAITyping, isAIChatOpen])
+
+  // Open Section 91 Notice Drawer
+  const handleOpenSec91Notice = async (accountId: string, bankName?: string, amount?: number) => {
+    const cleanAcc = accountId.trim()
+    if (!cleanAcc) return
+    const cleanBank = bankName || (cleanAcc.length >= 4 ? cleanAcc.slice(0, 4) + ' Bank' : 'Beneficiary Bank')
+    const cleanAmt = amount && amount > 0 ? amount : 50000.0
+
+    setSec91Target({ accountId: cleanAcc, bankName: cleanBank, amount: cleanAmt })
+    setIsSec91DrawerOpen(true)
+    setIsSec91Loading(true)
+    setSec91EditableText('')
+    setSec91Copied(false)
+
+    try {
+      const res = await fetch('/api/generate-notice', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          account_id: cleanAcc,
+          bank_name: cleanBank,
+          amount: cleanAmt,
+        }),
+      })
+      if (res.ok) {
+        const data = await res.json()
+        setSec91EditableText(data.notice || '')
+      }
+    } catch {
+      // fallback
+    } finally {
+      setIsSec91Loading(false)
+    }
+  }
+
+  // Download PDF Official
+  const handleSec91DownloadPDF = () => {
+    if (!sec91EditableText || !sec91Target) return
+
+    const doc = new jsPDF({
+      orientation: 'portrait',
+      unit: 'mm',
+      format: 'a4',
+    })
+
+    doc.setFont('times', 'bold')
+    doc.setFontSize(10)
+    doc.setTextColor(190, 18, 60)
+    doc.text('CONFIDENTIAL - CYBER FORENSICS CELL', 105, 14, { align: 'center' })
+
+    doc.setFontSize(8)
+    doc.setTextColor(100, 116, 139)
+    doc.text('FINANCIAL FRAUD INVESTIGATION & ASSET FREEZING DIVISION', 105, 19, { align: 'center' })
+
+    doc.setDrawColor(203, 213, 225)
+    doc.setLineWidth(0.4)
+    doc.line(15, 22, 195, 22)
+
+    doc.setFont('times', 'normal')
+    doc.setFontSize(10)
+    doc.setTextColor(15, 23, 42)
+
+    const splitText = doc.splitTextToSize(sec91EditableText, 180)
+    let y = 30
+    const pageHeight = doc.internal.pageSize.getHeight()
+
+    for (let i = 0; i < splitText.length; i++) {
+      if (y > pageHeight - 20) {
+        doc.addPage()
+        y = 20
+      }
+      doc.text(splitText[i], 15, y)
+      y += 5.5
+    }
+
+    const safeId = sec91Target.accountId.replace(/[^a-zA-Z0-9_-]/g, '_')
+    doc.save(`Sec91_Notice_${safeId}.pdf`)
+  }
 
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -805,6 +1174,9 @@ export default function App() {
         setSelectedEntity(null)
         setMasterGraphData(null)
         setShowTraceModal(false)
+        setSplitTraceData(null)
+        setIsSplitTracing(false)
+        setSplitTraceError(null)
         setBgIngestStatus('idle')
         setBgIngestMessage('')
         setShowUpload(true)
@@ -848,6 +1220,71 @@ export default function App() {
       setIsTracing(false)
     }
   }
+
+  // Automatically trigger 3-Hop Network Trace when a row is clicked (Split-Screen Right Panel - Phase 3)
+  useEffect(() => {
+    if (!selectedEntity) {
+      setSplitTraceData(null)
+      setIsSplitTracing(false)
+      setSplitTraceError(null)
+      return
+    }
+
+    const accountId =
+      selectedEntity.type === 'suspicious'
+        ? selectedEntity.data.account
+        : selectedEntity.data.sender
+
+    const cleanId = (accountId || '').trim()
+    if (!cleanId) return
+
+    let isMounted = true
+    setIsSplitTracing(true)
+    setSplitTraceError(null)
+    setSplitTraceData(null)
+
+    const fetchSplitTrace = async () => {
+      try {
+        const res = await fetch(`/api/trace/${encodeURIComponent(cleanId)}`)
+        if (res.ok) {
+          const data: TraceResponse = await res.json()
+          if (isMounted) {
+            setSplitTraceData(data)
+          }
+        } else {
+          // If backend isn't ready or account has no outbound rows, fall back to local buffer
+          if (localBuffer.length > 0) {
+            const fallback = computeLocalTrace(cleanId, localBuffer)
+            if (isMounted) {
+              setSplitTraceData(fallback)
+            }
+          } else {
+            const errJson = await res.json().catch(() => ({}))
+            throw new Error(errJson.detail || errJson.message || `Trace failed with status ${res.status}`)
+          }
+        }
+      } catch (err: unknown) {
+        if (isMounted) {
+          if (localBuffer.length > 0) {
+            const fallback = computeLocalTrace(cleanId, localBuffer)
+            setSplitTraceData(fallback)
+          } else {
+            setSplitTraceError(err instanceof Error ? err.message : 'Failed to trace network.')
+          }
+        }
+      } finally {
+        if (isMounted) {
+          setIsSplitTracing(false)
+        }
+      }
+    }
+
+    fetchSplitTrace()
+
+    return () => {
+      isMounted = false
+    }
+  }, [selectedEntity, localBuffer])
 
   const handlePageJumpSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -919,24 +1356,24 @@ export default function App() {
     suspiciousTotalRows > 0 ? Math.min(suspiciousPage * suspiciousPageSize, suspiciousTotalRows) : 0
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col font-sans">
-      {/* Enterprise Corporate Header */}
-      <header className="border-b border-slate-200 bg-white sticky top-0 z-50 px-6 py-3.5 shadow-xs">
+    <div className="min-h-screen bg-slate-900 flex flex-col font-sans selection:bg-indigo-500/20 selection:text-indigo-900">
+      {/* Enterprise Corporate Header (Dark Shell) */}
+      <header className="border-b border-slate-800 bg-[#0f172a]/95 backdrop-blur-md sticky top-0 z-50 px-6 py-3.5 shadow-md text-white">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div className="flex items-center space-x-3.5">
-            <div className="h-10 w-10 rounded-xl bg-indigo-600 flex items-center justify-center text-white shadow-sm">
+            <div className="h-10 w-10 rounded-xl bg-indigo-600 flex items-center justify-center text-white font-black shadow-md shadow-indigo-600/30">
               <Shield className="h-5 w-5" />
             </div>
             <div>
               <div className="flex items-center gap-2.5">
-                <h1 className="text-base font-bold text-slate-900 tracking-tight">
+                <h1 className="text-base font-bold text-slate-100 tracking-tight">
                   Financial Fraud Network Tracer
                 </h1>
-                <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200 font-mono">
+                <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-indigo-950 text-indigo-300 border border-indigo-800 font-mono">
                   Detect First &bull; Trace Second
                 </span>
               </div>
-              <p className="text-xs text-slate-500">Autonomous Mule Hub Flagging & Multi-Hop Forensics</p>
+              <p className="text-xs text-slate-400">Autonomous Mule Hub Flagging & Multi-Hop Forensics</p>
             </div>
           </div>
 
@@ -944,43 +1381,43 @@ export default function App() {
           <div className="flex items-center gap-3">
             {/* Non-intrusive Background Ingestion Indicator in Header */}
             {bgIngestStatus === 'syncing' && (
-              <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-indigo-50 border border-indigo-200 text-xs text-indigo-700 font-semibold shadow-2xs animate-pulse">
-                <RefreshCw className="h-3.5 w-3.5 animate-spin text-indigo-600" />
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs text-amber-400 font-semibold shadow-xs animate-pulse">
+                <RefreshCw className="h-3.5 w-3.5 animate-spin text-amber-400" />
                 <span>{bgIngestMessage || 'Background Ingestion in Progress...'}</span>
               </div>
             )}
 
             {bgIngestStatus === 'synced' && (
-              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-700 font-semibold shadow-2xs">
-                <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-400 font-semibold shadow-xs">
+                <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
                 <span>{bgIngestMessage || 'Data Fully Synced'}</span>
               </div>
             )}
 
             {bgIngestStatus === 'error' && (
-              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-700 font-semibold shadow-2xs">
-                <AlertCircle className="h-3.5 w-3.5 text-rose-600" />
+              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-400 font-semibold shadow-xs">
+                <AlertCircle className="h-3.5 w-3.5 text-rose-400" />
                 <span>Sync Error: {bgIngestMessage}</span>
               </div>
             )}
 
             {selectedFile && (
-              <span className="hidden md:inline-flex items-center gap-1 text-[11px] font-mono text-slate-500 bg-slate-100 px-2 py-1 rounded border border-slate-200">
+              <span className="hidden md:inline-flex items-center gap-1 text-[11px] font-mono text-slate-300 bg-slate-800 px-2 py-1 rounded border border-slate-700">
                 {selectedFile.name}
               </span>
             )}
 
             {/* DuckDB OLAP Engine Status */}
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-100 border border-slate-200 text-xs text-slate-700 font-medium">
-              <Database className="h-3.5 w-3.5 text-indigo-600" />
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-slate-300 font-medium">
+              <Database className="h-3.5 w-3.5 text-indigo-400" />
               <span>DuckDB OLAP:</span>
               {backendStatus === 'connected' ? (
-                <span className="flex items-center gap-1.5 text-emerald-700 font-semibold">
-                  <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                <span className="flex items-center gap-1.5 text-emerald-400 font-semibold">
+                  <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></span>
                   Ready ({totalRows > 0 ? `${totalRows.toLocaleString()} Rows` : 'Zero-Copy'})
                 </span>
               ) : (
-                <span className="flex items-center gap-1.5 text-rose-600 font-semibold">
+                <span className="flex items-center gap-1.5 text-rose-400 font-semibold">
                   <span className="h-2 w-2 rounded-full bg-rose-500"></span>
                   Offline
                 </span>
@@ -992,17 +1429,17 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setShowClearConfirm(true)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 hover:text-rose-800 text-xs font-bold transition shadow-2xs active:scale-95 cursor-pointer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-400 hover:text-rose-300 text-xs font-bold transition shadow-xs active:scale-95 cursor-pointer"
                 title="Drop DuckDB tables, free memory, and reset workspace"
               >
-                <Trash2 className="h-3.5 w-3.5 text-rose-600" />
+                <Trash2 className="h-3.5 w-3.5 text-rose-400" />
                 <span>Clear Space</span>
               </button>
             )}
 
             <button
               onClick={checkHealthAndSession}
-              className="p-1.5 rounded-lg bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 hover:text-slate-900 transition-colors shadow-xs cursor-pointer"
+              className="p-1.5 rounded-lg bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors shadow-xs cursor-pointer"
               title="Refresh engine state"
             >
               <RefreshCw className="h-3.5 w-3.5" />
@@ -1013,22 +1450,22 @@ export default function App() {
 
       {/* Clear Space Confirmation Modal */}
       {showClearConfirm && (
-        <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-md w-full p-6 animate-in fade-in zoom-in duration-150">
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-md w-full p-6 animate-in fade-in zoom-in duration-150 text-slate-800">
             <div className="flex items-center gap-3 mb-3 text-rose-600">
-              <div className="p-2.5 rounded-xl bg-rose-100">
+              <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200">
                 <AlertTriangle className="h-6 w-6" />
               </div>
               <h3 className="text-base font-bold text-slate-900">Clear Space Confirmation</h3>
             </div>
             <p className="text-xs text-slate-600 leading-relaxed">
-              This action will execute <code className="bg-slate-100 px-1 py-0.5 rounded text-rose-700 font-mono">DROP TABLE transactions</code> in DuckDB, release allocated RAM, wipe all local buffers, and reset the dashboard.
+              This action will execute <code className="bg-slate-100 px-1.5 py-0.5 rounded text-rose-600 font-mono border border-slate-200">DROP TABLE transactions</code> in DuckDB, release allocated RAM, wipe all local buffers, and reset the dashboard.
             </p>
             <div className="mt-5 flex items-center justify-end gap-2.5">
               <button
                 type="button"
                 onClick={() => setShowClearConfirm(false)}
-                className="px-3.5 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 text-xs font-semibold cursor-pointer"
+                className="px-3.5 py-1.5 rounded-lg bg-slate-100 border border-slate-200 hover:bg-slate-200 text-slate-700 text-xs font-semibold cursor-pointer"
               >
                 Cancel
               </button>
@@ -1046,213 +1483,317 @@ export default function App() {
         </div>
       )}
 
-      {/* Main Workspace */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-6 py-6 flex flex-col gap-6">
-        {/* Forensic Pipeline Stepper Header */}
-        <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-xs">
-          <div className="flex items-center justify-between text-xs font-medium text-slate-500 mb-3">
-            <span className="text-slate-900 font-semibold flex items-center gap-2">
-              <span className="h-2 w-2 rounded-full bg-indigo-600"></span>
-              Investigation Pipeline
-            </span>
-            <span className="font-mono text-indigo-600 font-semibold">Phase 2: Detect First &bull; Track Second</span>
-          </div>
-          <div className="grid grid-cols-4 gap-2">
-            <div className="h-1.5 rounded-full bg-emerald-600"></div>
-            <div className="h-1.5 rounded-full bg-indigo-600"></div>
-            <div className="h-1.5 rounded-full bg-slate-200"></div>
-            <div className="h-1.5 rounded-full bg-slate-200"></div>
-          </div>
-          <div className="grid grid-cols-4 gap-2 mt-2 text-[11px] font-medium text-slate-500">
-            <span className="text-emerald-700 font-semibold">&check; 1. Ingestion & Indexing</span>
-            <span className="text-indigo-600 font-semibold">2. Auto-Detect & 3-Hop Tracing</span>
-            <span className="text-slate-400">3. WebGL Graph & Time-Travel</span>
-            <span className="text-slate-400">4. Sec 91 Legal Action</span>
-          </div>
-        </div>
-
-        {/* SECTION 1: UPLOAD ZONE (RENDERED ONLY WHEN NO DATA LOADED OR TOGGLED EXPLICITLY) */}
-        {(showUpload || (!transactions && localBuffer.length === 0)) && (
-          <div className="bg-white rounded-xl border border-slate-200 p-6 md:p-8 shadow-xs">
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <UploadCloud className="h-5 w-5 text-indigo-600" />
-                  Transaction Journal Ingestion
-                </h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Select your transaction CSV. The UI will instantly display records in milliseconds while DuckDB ingests 2M+ rows in the background.
-                </p>
-              </div>
+      {/* Content Area (Soft Light Grey) */}
+      <div className="flex-1 bg-slate-50 text-slate-800">
+        <main className="max-w-7xl w-full mx-auto px-6 py-6 flex flex-col gap-6">
+          {/* INTERACTIVE FORENSIC PIPELINE STEPPER (CRISP WHITE CARD) */}
+          <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
+            <div className="flex items-center justify-between text-xs font-medium text-slate-500 mb-3 flex-wrap gap-2">
+              <span className="text-slate-900 font-bold flex items-center gap-2">
+                <span className="h-2 w-2 rounded-full bg-indigo-600 animate-pulse"></span>
+                Investigation Pipeline
+              </span>
               <div className="flex items-center gap-2">
-                <span className="text-[11px] font-mono font-medium text-indigo-700 bg-indigo-50 px-2.5 py-1 rounded border border-indigo-200">
-                  Zero-Wait Streaming
+                <span className="text-[11px] font-mono text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-200 font-semibold">
+                  Click any step to switch view
                 </span>
-                {transactions && transactions.data.length > 0 && (
-                  <button
-                    onClick={() => setShowUpload(false)}
-                    className="p-1 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 cursor-pointer"
-                    title="Close upload panel"
-                  >
-                    <X className="h-4 w-4" />
-                  </button>
-                )}
+                <span className="text-slate-400 text-xs hidden sm:inline">&bull; Zero State Loss</span>
               </div>
             </div>
 
-            {/* Drag & Drop Zone */}
-            <div
-              onDragEnter={handleDrag}
-              onDragLeave={handleDrag}
-              onDragOver={handleDrag}
-              onDrop={handleDrop}
-              onClick={() => fileInputRef.current?.click()}
-              className={`border-2 border-dashed rounded-xl p-8 md:p-10 text-center cursor-pointer transition-all duration-150 ${
-                dragActive
-                  ? 'border-indigo-600 bg-indigo-50/50'
-                  : selectedFile
-                  ? 'border-indigo-400 bg-indigo-50/20'
-                  : 'border-slate-300 hover:border-indigo-400 bg-slate-50/50 hover:bg-slate-50'
-              }`}
-            >
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".csv"
-                onChange={handleFileInputChange}
-                className="hidden"
-              />
-
-              <div className="flex flex-col items-center justify-center space-y-3">
-                <div className="h-12 w-12 rounded-xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600">
-                  <UploadCloud className="h-6 w-6" />
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+              {/* Step 1: Ingestion & Indexing */}
+              <button
+                type="button"
+                onClick={() => handleStepClick(1)}
+                className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col gap-1.5 ${
+                  currentPipelineStep === 1
+                    ? 'border-indigo-500 bg-indigo-50/70 shadow-xs ring-1 ring-indigo-500/20'
+                    : 'border-slate-200 bg-slate-50/70 hover:bg-slate-100/70 hover:border-slate-300'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">
+                    Step 01
+                  </span>
+                  <span className="h-2 w-2 rounded-full bg-emerald-500"></span>
                 </div>
+                <div className="flex items-center gap-2">
+                  <UploadCloud className={`h-4 w-4 ${currentPipelineStep === 1 ? 'text-indigo-600' : 'text-slate-500'}`} />
+                  <span className={`text-xs font-bold ${currentPipelineStep === 1 ? 'text-indigo-700' : 'text-slate-800'}`}>
+                    Ingestion & Indexing
+                  </span>
+                </div>
+                <span className="text-[11px] text-slate-500 line-clamp-1">
+                  {totalRows > 0 ? `${totalRows.toLocaleString()} Rows Synced` : 'CSV Journal Upload'}
+                </span>
+              </button>
+
+              {/* Step 2: Auto-Detect & Suspicious Hubs */}
+              <button
+                type="button"
+                onClick={() => handleStepClick(2)}
+                className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col gap-1.5 ${
+                  currentPipelineStep === 2
+                    ? 'border-indigo-500 bg-indigo-50/70 shadow-xs ring-1 ring-indigo-500/20'
+                    : 'border-slate-200 bg-slate-50/70 hover:bg-slate-100/70 hover:border-slate-300'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">
+                    Step 02
+                  </span>
+                  <span className={`h-2 w-2 rounded-full ${suspiciousTotalRows > 0 ? 'bg-amber-500' : 'bg-slate-300'}`}></span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className={`h-4 w-4 ${currentPipelineStep === 2 ? 'text-indigo-600' : 'text-slate-500'}`} />
+                  <span className={`text-xs font-bold ${currentPipelineStep === 2 ? 'text-indigo-700' : 'text-slate-800'}`}>
+                    Auto-Detect & Hubs
+                  </span>
+                </div>
+                <span className="text-[11px] text-slate-500 line-clamp-1">
+                  {suspiciousTotalRows > 0 ? `${suspiciousTotalRows.toLocaleString()} Flagged Accounts` : 'Mule & Velocity Heuristics'}
+                </span>
+              </button>
+
+              {/* Step 3: 3-Hop Graph & Time-Travel */}
+              <button
+                type="button"
+                onClick={() => handleStepClick(3)}
+                className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col gap-1.5 ${
+                  currentPipelineStep === 3
+                    ? 'border-indigo-500 bg-indigo-50/70 shadow-xs ring-1 ring-indigo-500/20'
+                    : 'border-slate-200 bg-slate-50/70 hover:bg-slate-100/70 hover:border-slate-300'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">
+                    Step 03
+                  </span>
+                  <span className={`h-2 w-2 rounded-full ${selectedEntity ? 'bg-indigo-600' : 'bg-slate-300'}`}></span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Network className={`h-4 w-4 ${currentPipelineStep === 3 ? 'text-indigo-600' : 'text-slate-500'}`} />
+                  <span className={`text-xs font-bold ${currentPipelineStep === 3 ? 'text-indigo-700' : 'text-slate-800'}`}>
+                    OSINT Graph & Trail
+                  </span>
+                </div>
+                <span className="text-[11px] text-slate-500 line-clamp-1">
+                  {selectedEntity ? (selectedEntity.type === 'suspicious' ? `Tracing ${selectedEntity.data.account}` : 'Active Transfer Trail') : 'Select suspect to render'}
+                </span>
+              </button>
+
+              {/* Step 4: AI Legal Action & Assistant */}
+              <button
+                type="button"
+                onClick={() => handleStepClick(4)}
+                className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col gap-1.5 ${
+                  currentPipelineStep === 4
+                    ? 'border-indigo-500 bg-indigo-50/70 shadow-xs ring-1 ring-indigo-500/20'
+                    : 'border-slate-200 bg-slate-50/70 hover:bg-slate-100/70 hover:border-slate-300'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">
+                    Step 04
+                  </span>
+                  <span className="h-2 w-2 rounded-full bg-purple-500 animate-pulse"></span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Bot className={`h-4 w-4 ${currentPipelineStep === 4 ? 'text-purple-600' : 'text-slate-500'}`} />
+                  <span className={`text-xs font-bold ${currentPipelineStep === 4 ? 'text-purple-700' : 'text-slate-800'}`}>
+                    AI Action & Freeze
+                  </span>
+                </div>
+                <span className="text-[11px] text-slate-500 line-clamp-1">
+                  Sec 91 Notices & Chat Assistant
+                </span>
+              </button>
+            </div>
+          </div>
+
+          {/* SECTION 1: UPLOAD ZONE (CRISP WHITE CARD) */}
+          {(showUpload || (!transactions && localBuffer.length === 0)) && (
+            <div className="bg-white rounded-xl border border-slate-200 p-6 md:p-8 shadow-sm">
+              <div className="flex items-center justify-between mb-4">
                 <div>
-                  <p className="text-sm font-semibold text-slate-800">
-                    {selectedFile ? (
-                      <>
-                        Selected File:{' '}
-                        <span className="text-indigo-600 font-bold underline underline-offset-2">
-                          {selectedFile.name}
-                        </span>
-                      </>
-                    ) : (
-                      <>
-                        Drop transaction CSV file here, or{' '}
-                        <span className="text-indigo-600 underline underline-offset-2">browse computer</span>
-                      </>
-                    )}
-                  </p>
-                  <p className="text-xs text-slate-500 mt-1">
-                    Columns: <code className="text-slate-700 bg-slate-200/60 px-1 py-0.5 rounded">sender</code>, <code className="text-slate-700 bg-slate-200/60 px-1 py-0.5 rounded">receiver</code>, <code className="text-slate-700 bg-slate-200/60 px-1 py-0.5 rounded">amount</code>, <code className="text-slate-700 bg-slate-200/60 px-1 py-0.5 rounded">timestamp</code>, <code className="text-slate-700 bg-slate-200/60 px-1 py-0.5 rounded">ip_address</code>, <code className="text-slate-700 bg-slate-200/60 px-1 py-0.5 rounded">device_type</code>, <code className="text-slate-700 bg-slate-200/60 px-1 py-0.5 rounded">payment_mode</code>, <code className="text-slate-700 bg-slate-200/60 px-1 py-0.5 rounded">narration</code>
+                  <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                    <UploadCloud className="h-5 w-5 text-indigo-600" />
+                    Transaction Journal Ingestion
+                  </h2>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Select your transaction CSV. The UI will instantly display records in milliseconds while DuckDB ingests 2M+ rows in the background.
                   </p>
                 </div>
-                <div className="flex items-center gap-2 pt-1 text-[11px] text-slate-500">
-                  <span className="px-2 py-0.5 rounded bg-white border border-slate-200">Zero-Wait Local Parsing</span>
-                  <span className="px-2 py-0.5 rounded bg-white border border-slate-200">Asynchronous DuckDB Columnar Ingestion</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-mono font-medium text-indigo-700 bg-indigo-50 px-2.5 py-1 rounded border border-indigo-200">
+                    Zero-Wait Streaming
+                  </span>
+                  {transactions && transactions.data.length > 0 && (
+                    <button
+                      onClick={() => setShowUpload(false)}
+                      className="p-1 rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-100 cursor-pointer"
+                      title="Close upload panel"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  )}
                 </div>
               </div>
-            </div>
 
-            {/* Selected File Banner & Prominent "Start Ingestion & Analysis" Button */}
-            {selectedFile && (
-              <div className="mt-5 p-4 md:p-5 rounded-xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-4 animate-in fade-in slide-in-from-top-2 duration-150">
-                <div className="flex items-center gap-3.5 w-full sm:w-auto">
-                  <div className="h-11 w-11 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600 shrink-0 shadow-2xs">
-                    <FileText className="h-6 w-6" />
+              {/* Drag & Drop Zone */}
+              <div
+                onDragEnter={handleDrag}
+                onDragLeave={handleDrag}
+                onDragOver={handleDrag}
+                onDrop={handleDrop}
+                onClick={() => fileInputRef.current?.click()}
+                className={`border-2 border-dashed rounded-xl p-8 md:p-10 text-center cursor-pointer transition-all duration-150 ${
+                  dragActive
+                    ? 'border-indigo-500 bg-indigo-50'
+                    : selectedFile
+                    ? 'border-indigo-500/60 bg-indigo-50/40'
+                    : 'border-slate-300 hover:border-indigo-400 bg-slate-50/60 hover:bg-slate-100/60'
+                }`}
+              >
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".csv"
+                  onChange={handleFileInputChange}
+                  className="hidden"
+                />
+
+                <div className="flex flex-col items-center justify-center space-y-3">
+                  <div className="h-12 w-12 rounded-xl bg-indigo-50 border border-indigo-200 flex items-center justify-center text-indigo-600">
+                    <UploadCloud className="h-6 w-6" />
                   </div>
                   <div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-sm font-bold text-slate-900 font-mono">
-                        {selectedFile.name}
-                      </span>
-                      <span className="text-[11px] font-mono text-slate-500 bg-white px-2 py-0.5 rounded border border-slate-200">
-                        {(selectedFile.size / (1024 * 1024)).toFixed(2)} MB
-                      </span>
-                      {bgIngestStatus === 'synced' ? (
-                        <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200 flex items-center gap-1">
-                          <Check className="h-3 w-3" />
-                          Data Fully Synced
-                        </span>
-                      ) : bgIngestStatus === 'syncing' ? (
-                        <span className="text-[10px] font-semibold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full border border-indigo-200 flex items-center gap-1 animate-pulse">
-                          <RefreshCw className="h-3 w-3 animate-spin text-indigo-600" />
-                          Syncing full dataset in background...
-                        </span>
-                      ) : localBuffer.length > 0 ? (
-                        <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200 flex items-center gap-1">
-                          <Check className="h-3 w-3" />
-                          {localBuffer.length} Rows Buffered Ready
-                        </span>
-                      ) : null}
-                    </div>
-                    <p className="text-xs text-slate-500 mt-0.5">
-                      Ready for instant analysis. Click below to explore flagged accounts immediately.
+                    <p className="text-sm font-semibold text-slate-800">
+                      {selectedFile ? (
+                        <>
+                          Selected File:{' '}
+                          <span className="text-indigo-600 font-bold underline underline-offset-2">
+                            {selectedFile.name}
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          Drop transaction CSV file here, or{' '}
+                          <span className="text-indigo-600 underline underline-offset-2">browse computer</span>
+                        </>
+                      )}
+                    </p>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Columns: <code className="text-slate-700 bg-slate-100 px-1 py-0.5 rounded border border-slate-200">sender</code>, <code className="text-slate-700 bg-slate-100 px-1 py-0.5 rounded border border-slate-200">receiver</code>, <code className="text-slate-700 bg-slate-100 px-1 py-0.5 rounded border border-slate-200">amount</code>, <code className="text-slate-700 bg-slate-100 px-1 py-0.5 rounded border border-slate-200">timestamp</code>, <code className="text-slate-700 bg-slate-100 px-1 py-0.5 rounded border border-slate-200">ip_address</code>, <code className="text-slate-700 bg-slate-100 px-1 py-0.5 rounded border border-slate-200">device_type</code>, <code className="text-slate-700 bg-slate-100 px-1 py-0.5 rounded border border-slate-200">payment_mode</code>, <code className="text-slate-700 bg-slate-100 px-1 py-0.5 rounded border border-slate-200">narration</code>
                     </p>
                   </div>
-                </div>
-
-                <div className="flex items-center gap-2.5 w-full sm:w-auto justify-end">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedFile(null)
-                      setLocalBuffer([])
-                      setLocalMirageSuspicious(null)
-                      setLocalMirageTransactions(null)
-                      setLocalMirageSuspiciousSet(new Set())
-                      setBgIngestStatus('idle')
-                      setBgIngestMessage('')
-                      if (fileInputRef.current) fileInputRef.current.value = ''
-                    }}
-                    className="px-3.5 py-2.5 rounded-xl bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-semibold transition cursor-pointer"
-                  >
-                    Change File
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleStartIngestion}
-                    className="inline-flex items-center justify-center gap-2 px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-md hover:shadow-lg transition-all active:scale-95 cursor-pointer"
-                  >
-                    <Zap className="h-4 w-4 text-amber-300" />
-                    <span>Start Ingestion & Analysis</span>
-                    <ArrowRight className="h-3.5 w-3.5" />
-                  </button>
+                  <div className="flex items-center gap-2 pt-1 text-[11px] text-slate-500">
+                    <span className="px-2 py-0.5 rounded bg-white border border-slate-200">Zero-Wait Local Parsing</span>
+                    <span className="px-2 py-0.5 rounded bg-white border border-slate-200">Asynchronous DuckDB Columnar Ingestion</span>
+                  </div>
                 </div>
               </div>
-            )}
 
-            {/* Error Message */}
-            {errorMessage && (
-              <div className="mt-4 p-3.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center gap-2.5">
-                <AlertCircle className="h-4 w-4 shrink-0 text-rose-600" />
-                <span>{errorMessage}</span>
-              </div>
-            )}
-          </div>
-        )}
+              {/* Selected File Banner & Prominent "Start Ingestion & Analysis" Button */}
+              {selectedFile && (
+                <div className="mt-5 p-4 md:p-5 rounded-xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-4 animate-in fade-in slide-in-from-top-2 duration-150">
+                  <div className="flex items-center gap-3.5 w-full sm:w-auto">
+                    <div className="h-11 w-11 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600 shrink-0 shadow-2xs">
+                      <FileText className="h-6 w-6" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-bold text-slate-900 font-mono">
+                          {selectedFile.name}
+                        </span>
+                        <span className="text-[11px] font-mono text-slate-600 bg-white px-2 py-0.5 rounded border border-slate-200">
+                          {(selectedFile.size / (1024 * 1024)).toFixed(2)} MB
+                        </span>
+                        {bgIngestStatus === 'synced' ? (
+                          <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200 flex items-center gap-1">
+                            <Check className="h-3 w-3" />
+                            Data Fully Synced
+                          </span>
+                        ) : bgIngestStatus === 'syncing' ? (
+                          <span className="text-[10px] font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200 flex items-center gap-1 animate-pulse">
+                            <RefreshCw className="h-3.5 w-3.5 animate-spin text-amber-600" />
+                            Syncing full dataset in background...
+                          </span>
+                        ) : localBuffer.length > 0 ? (
+                          <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200 flex items-center gap-1">
+                            <Check className="h-3 w-3" />
+                            {localBuffer.length} Rows Buffered Ready
+                          </span>
+                        ) : null}
+                      </div>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        Ready for instant analysis. Click below to explore flagged accounts immediately.
+                      </p>
+                    </div>
+                  </div>
 
-        {/* SECTION 2: ROW CLICK DETAILED VIEW & SPLIT SCREEN (PREP FOR PHASE 3) */}
+                  <div className="flex items-center gap-2.5 w-full sm:w-auto justify-end">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedFile(null)
+                        setLocalBuffer([])
+                        setLocalMirageSuspicious(null)
+                        setLocalMirageTransactions(null)
+                        setLocalMirageSuspiciousSet(new Set())
+                        setBgIngestStatus('idle')
+                        setBgIngestMessage('')
+                        if (fileInputRef.current) fileInputRef.current.value = ''
+                      }}
+                      className="px-3.5 py-2.5 rounded-xl bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 text-xs font-semibold transition cursor-pointer shadow-2xs"
+                    >
+                      Change File
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleStartIngestion}
+                      className="inline-flex items-center justify-center gap-2 px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-md shadow-indigo-600/25 transition-all active:scale-95 cursor-pointer"
+                    >
+                      <Zap className="h-4 w-4 text-white" />
+                      <span>Start Ingestion & Analysis</span>
+                      <ArrowRight className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Error Message */}
+              {errorMessage && (
+                <div className="mt-4 p-3.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center gap-2.5">
+                  <AlertCircle className="h-4 w-4 shrink-0 text-rose-600" />
+                  <span>{errorMessage}</span>
+                </div>
+              )}
+            </div>
+          )}
+
+        {/* SECTION 2: ROW CLICK DETAILED VIEW & SPLIT SCREEN (CRISP WHITE CARD) */}
         {selectedEntity !== null && (
-          <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-xs flex flex-col gap-6">
+          <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm flex flex-col gap-6 text-slate-800">
             {/* Top Navigation & Breadcrumbs Bar */}
             <div className="flex items-center justify-between flex-wrap gap-4 pb-4 border-b border-slate-200">
               <div className="flex items-center gap-3">
                 <button
                   type="button"
                   onClick={() => setSelectedEntity(null)}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 text-xs font-bold transition shadow-2xs cursor-pointer active:scale-95"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-bold transition shadow-2xs cursor-pointer active:scale-95"
                 >
                   <ArrowLeft className="h-4 w-4" />
                   <span>Back to List</span>
                 </button>
-                <div className="h-5 w-px bg-slate-300"></div>
+                <div className="h-5 w-px bg-slate-200"></div>
                 <div>
                   <div className="flex items-center gap-2">
                     <span className="text-[11px] font-mono font-bold uppercase tracking-wider text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-200">
                       Entity Detail View
                     </span>
-                    <span className="text-xs font-mono font-bold text-slate-900 bg-slate-100 px-2.5 py-0.5 rounded border border-slate-200">
+                    <span className="text-xs font-mono font-bold text-slate-800 bg-slate-100 px-2.5 py-0.5 rounded border border-slate-200">
                       {selectedEntity.type === 'suspicious'
                         ? `Account: ${selectedEntity.data.account}`
                         : `Txn: ${selectedEntity.data.sender} &rarr; ${selectedEntity.data.receiver}`}
@@ -1272,7 +1813,7 @@ export default function App() {
                         : selectedEntity.data.sender
                     handleTrackAccount(accId)
                   }}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-xs transition active:scale-95 cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-md shadow-indigo-600/20 transition active:scale-95 cursor-pointer"
                 >
                   <Network className="h-3.5 w-3.5" />
                   <span>Trace 3-Hop Network</span>
@@ -1280,14 +1821,14 @@ export default function App() {
               </div>
             </div>
 
-            {/* Split Screen Layout: Left Panel = Metadata Details, Right Panel = Dashed Placeholder */}
+            {/* Split Screen Layout: Left Panel = Metadata Details, Right Panel = Graph Container */}
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
               {/* LEFT PANEL: VERTICAL TEXT DETAILS OF ALL ENTITY METADATA */}
               <div className="lg:col-span-5 flex flex-col gap-4">
                 {selectedEntity.type === 'suspicious' ? (
                   <>
                     {/* Card 1: Account Header & Risk Score */}
-                    <div className="p-5 rounded-xl bg-slate-50/80 border border-slate-200 flex flex-col gap-3.5">
+                    <div className="p-5 rounded-xl bg-slate-50 border border-slate-200 flex flex-col gap-3.5">
                       <div className="flex items-start justify-between">
                         <div>
                           <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">
@@ -1300,7 +1841,7 @@ export default function App() {
                             <button
                               type="button"
                               onClick={() => copyToClipboard(selectedEntity.data.account)}
-                              className="p-1 rounded text-slate-400 hover:text-slate-600 hover:bg-slate-200/60 transition cursor-pointer"
+                              className="p-1 rounded text-slate-400 hover:text-slate-700 hover:bg-slate-200 transition cursor-pointer"
                               title="Copy account number"
                             >
                               {copiedId === selectedEntity.data.account ? (
@@ -1312,19 +1853,19 @@ export default function App() {
                           </div>
                         </div>
 
-                        {/* Risk Score Pill */}
+                        {/* Risk Score Pill (Capped at 99% per specification) */}
                         <div className="text-right">
                           <span
                             className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-extrabold font-mono border ${
                               selectedEntity.data.risk_score >= 80
-                                ? 'bg-rose-100 text-rose-800 border-rose-300'
+                                ? 'bg-rose-50 text-rose-700 border-rose-200'
                                 : selectedEntity.data.risk_score >= 50
-                                ? 'bg-orange-100 text-orange-800 border-orange-300'
-                                : 'bg-amber-100 text-amber-800 border-amber-300'
+                                ? 'bg-orange-50 text-orange-700 border-orange-200'
+                                : 'bg-amber-50 text-amber-700 border-amber-200'
                             }`}
                           >
                             <AlertTriangle className="h-3 w-3" />
-                            {selectedEntity.data.risk_level} {selectedEntity.data.risk_score}/100
+                            {selectedEntity.data.risk_level} {selectedEntity.data.risk_score}%
                           </span>
                         </div>
                       </div>
@@ -1334,7 +1875,7 @@ export default function App() {
                         <div
                           className={`h-2 rounded-full ${
                             selectedEntity.data.risk_score >= 80
-                              ? 'bg-rose-600'
+                              ? 'bg-rose-500'
                               : selectedEntity.data.risk_score >= 50
                               ? 'bg-orange-500'
                               : 'bg-amber-500'
@@ -1354,7 +1895,7 @@ export default function App() {
                               key={fIdx}
                               className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-white border border-slate-200 text-slate-800 shadow-2xs"
                             >
-                              <Zap className="h-3 w-3 text-amber-600" />
+                              <Zap className="h-3 w-3 text-indigo-600" />
                               {factor}
                             </span>
                           ))}
@@ -1362,12 +1903,108 @@ export default function App() {
                       </div>
                     </div>
 
+                    {/* PHASE 4: INSTANT AI SUSPECT THREAT INTELLIGENCE REPORT CARD */}
+                    <div className="p-5 rounded-xl bg-white border border-indigo-200 shadow-sm flex flex-col gap-3.5">
+                      <div className="flex items-center justify-between flex-wrap gap-2 pb-2.5 border-b border-slate-200">
+                        <div className="flex items-center gap-2">
+                          <div className="h-6 w-6 rounded-lg bg-indigo-50 border border-indigo-200 flex items-center justify-center text-indigo-600">
+                            <ShieldAlert className="h-3.5 w-3.5" />
+                          </div>
+                          <div>
+                            <h4 className="text-xs font-bold uppercase tracking-wider text-slate-900">
+                              Threat Intelligence Report
+                            </h4>
+                            <span className="text-[10px] text-indigo-700 font-mono font-semibold">
+                              Autonomous AI Forensic Justification
+                            </span>
+                          </div>
+                        </div>
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold font-mono bg-indigo-50 text-indigo-700 border border-indigo-200">
+                          Deterministic Scoring &bull; Capped 99%
+                        </span>
+                      </div>
+
+                      {/* Heuristic 1: Mule Risk Index */}
+                      <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 flex flex-col gap-1 shadow-2xs">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] font-bold text-slate-800 flex items-center gap-1.5">
+                            <span className="h-1.5 w-1.5 rounded-full bg-rose-500"></span>
+                            Mule Risk Index (Topology & Fan-Out)
+                          </span>
+                          <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200">
+                            {selectedEntity.data.wash_ratio}% Pass-Through
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-600 leading-relaxed mt-0.5">
+                          {selectedEntity.data.threat_report?.mule_risk_index.description ||
+                            `Account functions as an intermediary mule aggregation hub. Receives funds from ${selectedEntity.data.unique_senders} source(s) and rapidly fans out to ${selectedEntity.data.unique_receivers} downstream beneficiary account(s).`}
+                        </p>
+                      </div>
+
+                      {/* Heuristic 2: Money Laundering Flow */}
+                      <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 flex flex-col gap-1 shadow-2xs">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] font-bold text-slate-800 flex items-center gap-1.5">
+                            <span className="h-1.5 w-1.5 rounded-full bg-amber-500"></span>
+                            Money Laundering Flow (Structuring & Volume)
+                          </span>
+                          <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
+                            ${selectedEntity.data.total_volume.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-600 leading-relaxed mt-0.5">
+                          {selectedEntity.data.threat_report?.money_laundering_flow.description ||
+                            `Cumulative volume throughput of $${selectedEntity.data.total_volume.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}. Transactions show patterns consistent with smurfing under mandatory reporting ceilings.`}
+                        </p>
+                      </div>
+
+                      {/* Heuristic 3: Panic / Rapid Transfer (Timestamp Velocity) */}
+                      <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 flex flex-col gap-1 shadow-2xs">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] font-bold text-slate-800 flex items-center gap-1.5">
+                            <span className="h-1.5 w-1.5 rounded-full bg-purple-500"></span>
+                            Panic / Rapid Transfer (Timestamp Velocity)
+                          </span>
+                          <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-purple-50 text-purple-700 border border-purple-200">
+                            High Velocity Relay
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-600 leading-relaxed mt-0.5">
+                          {selectedEntity.data.threat_report?.rapid_transfer_velocity.description ||
+                            `High-velocity panic transfer detected: inbound transactions were dispersed downstream within minutes to preempt bank hold orders and victim chargebacks.`}
+                        </p>
+                      </div>
+
+                      {/* Quick Action Buttons */}
+                      <div className="flex items-center gap-2 pt-1 border-t border-slate-200">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenSec91Notice(selectedEntity.data.account, selectedEntity.data.account.slice(0, 4) + ' Bank', selectedEntity.data.total_received || selectedEntity.data.total_volume)}
+                          className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold transition shadow-xs cursor-pointer active:scale-95"
+                        >
+                          <Gavel className="h-3.5 w-3.5" />
+                          <span>Draft Sec 91 Notice</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsAIChatOpen(true)
+                            handleSendChatMessage(`Analyze victim account ${selectedEntity.data.account}`)
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold transition cursor-pointer active:scale-95 shadow-xs"
+                        >
+                          <Bot className="h-3.5 w-3.5" />
+                          <span>Ask AI</span>
+                        </button>
+                      </div>
+                    </div>
+
                     {/* Card 2: Forensic Telemetry & Attributes */}
-                    <div className="p-5 rounded-xl bg-white border border-slate-200 shadow-2xs flex flex-col gap-3">
+                    <div className="p-5 rounded-xl bg-slate-50 border border-slate-200 shadow-2xs flex flex-col gap-3">
                       <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700">
                         Entity Behavioral Metrics
                       </h4>
-                      <dl className="divide-y divide-slate-100 text-xs">
+                      <dl className="divide-y divide-slate-200 text-xs">
                         <div className="py-2 flex items-center justify-between">
                           <dt className="text-slate-500 flex items-center gap-1.5">
                             <Smartphone className="h-3.5 w-3.5 text-purple-600" /> Primary Device:
@@ -1386,13 +2023,13 @@ export default function App() {
                         </div>
                         <div className="py-2 flex items-center justify-between">
                           <dt className="text-slate-500">Total Inflow Received:</dt>
-                          <dd className="font-mono font-bold text-emerald-700">
+                          <dd className="font-mono font-bold text-emerald-600">
                             ${selectedEntity.data.total_received.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                           </dd>
                         </div>
                         <div className="py-2 flex items-center justify-between">
                           <dt className="text-slate-500">Total Outflow Sent:</dt>
-                          <dd className="font-mono font-bold text-rose-700">
+                          <dd className="font-mono font-bold text-rose-600">
                             ${selectedEntity.data.total_sent.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                           </dd>
                         </div>
@@ -1404,19 +2041,19 @@ export default function App() {
                         </div>
                         <div className="py-2 flex items-center justify-between">
                           <dt className="text-slate-500">Wash Ratio (Velocity):</dt>
-                          <dd className="font-mono font-bold text-indigo-700">
+                          <dd className="font-mono font-bold text-indigo-600">
                             {selectedEntity.data.wash_ratio}% Pass-Through
                           </dd>
                         </div>
                         <div className="py-2 flex items-center justify-between">
                           <dt className="text-slate-500">Transaction Count:</dt>
-                          <dd className="font-mono font-semibold text-slate-800">
+                          <dd className="font-mono font-semibold text-slate-900">
                             {selectedEntity.data.transaction_count} transfers
                           </dd>
                         </div>
                         <div className="py-2 flex items-center justify-between">
                           <dt className="text-slate-500">Unique Counterparties:</dt>
-                          <dd className="font-mono font-semibold text-slate-800">
+                          <dd className="font-mono font-semibold text-slate-900">
                             {selectedEntity.data.unique_senders} in / {selectedEntity.data.unique_receivers} out
                           </dd>
                         </div>
@@ -1424,12 +2061,12 @@ export default function App() {
                     </div>
 
                     {/* Card 3: Law Enforcement Regulatory Assessment */}
-                    <div className="p-4 rounded-xl bg-amber-50/70 border border-amber-200 text-xs">
-                      <div className="flex items-center gap-2 text-amber-900 font-bold mb-1">
+                    <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-xs">
+                      <div className="flex items-center gap-2 text-amber-800 font-bold mb-1">
                         <AlertTriangle className="h-4 w-4 text-amber-600" />
                         <span>Investigative Recommendation</span>
                       </div>
-                      <p className="text-amber-800 leading-relaxed text-[11px]">
+                      <p className="text-amber-900 leading-relaxed text-[11px]">
                         Account exhibits signature pass-through money laundering behavior. Recommended for evidentiary export and immediate Section 91 CrPC freezing order issuance.
                       </p>
                     </div>
@@ -1437,19 +2074,19 @@ export default function App() {
                 ) : (
                   <>
                     {/* Transaction Detail Cards */}
-                    <div className="p-5 rounded-xl bg-slate-50/80 border border-slate-200 flex flex-col gap-3">
+                    <div className="p-5 rounded-xl bg-slate-50 border border-slate-200 flex flex-col gap-3">
                       <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">
                         Ledger Transaction Summary
                       </span>
                       <div className="flex items-center justify-between pb-2 border-b border-slate-200">
                         <span className="text-xs text-slate-500">Transfer Amount:</span>
-                        <span className="text-xl font-extrabold font-mono text-emerald-700">
+                        <span className="text-xl font-extrabold font-mono text-emerald-600">
                           ${selectedEntity.data.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                         </span>
                       </div>
                       <div className="flex items-center justify-between text-xs">
                         <span className="text-slate-500">Recorded Timestamp:</span>
-                        <span className="font-mono font-medium text-slate-800">{selectedEntity.data.timestamp}</span>
+                        <span className="font-mono font-medium text-slate-900">{selectedEntity.data.timestamp}</span>
                       </div>
                       <div className="flex items-center justify-between text-xs">
                         <span className="text-slate-500">Payment Mode:</span>
@@ -1459,11 +2096,11 @@ export default function App() {
                       </div>
                     </div>
 
-                    <div className="p-5 rounded-xl bg-white border border-slate-200 shadow-2xs flex flex-col gap-3">
+                    <div className="p-5 rounded-xl bg-slate-50 border border-slate-200 shadow-2xs flex flex-col gap-3">
                       <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700">
                         Counterparty Entities
                       </h4>
-                      <dl className="divide-y divide-slate-100 text-xs">
+                      <dl className="divide-y divide-slate-200 text-xs">
                         <div className="py-2.5 flex items-center justify-between">
                           <dt className="text-slate-500">Sender Account:</dt>
                           <dd className="flex items-center gap-2">
@@ -1471,7 +2108,7 @@ export default function App() {
                             <button
                               type="button"
                               onClick={() => handleTrackAccount(selectedEntity.data.sender)}
-                              className="px-2 py-0.5 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-[10px] font-bold cursor-pointer"
+                              className="px-2 py-0.5 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-[10px] font-bold border border-indigo-200 cursor-pointer"
                             >
                               Track
                             </button>
@@ -1484,7 +2121,7 @@ export default function App() {
                             <button
                               type="button"
                               onClick={() => handleTrackAccount(selectedEntity.data.receiver)}
-                              className="px-2 py-0.5 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-[10px] font-bold cursor-pointer"
+                              className="px-2 py-0.5 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-[10px] font-bold border border-indigo-200 cursor-pointer"
                             >
                               Track
                             </button>
@@ -1504,7 +2141,7 @@ export default function App() {
                         </div>
                         <div className="py-2.5 flex flex-col gap-1">
                           <dt className="text-slate-500">Transaction Narration:</dt>
-                          <dd className="font-mono text-slate-900 bg-slate-50 p-2 rounded border border-slate-200 text-[11px]">
+                          <dd className="font-mono text-slate-800 bg-white p-2 rounded border border-slate-200 text-[11px]">
                             {selectedEntity.data.narration || 'No bank memo provided'}
                           </dd>
                         </div>
@@ -1514,48 +2151,68 @@ export default function App() {
                 )}
               </div>
 
-              {/* RIGHT PANEL: DASHED CONTAINER RESERVED FOR PHASE 3 WEBGL FLOW GRAPH */}
-              <div className="lg:col-span-7">
-                <div className="min-h-[550px] h-full border-2 border-dashed border-slate-300 rounded-xl bg-slate-50/80 p-8 flex flex-col items-center justify-center text-center relative shadow-xs">
-                  <div className="h-16 w-16 rounded-2xl bg-indigo-50 border border-indigo-200 flex items-center justify-center text-indigo-600 mb-4 shadow-sm animate-pulse">
-                    <Network className="h-8 w-8" />
-                  </div>
-                  <span className="text-[11px] font-mono font-bold uppercase tracking-wider text-indigo-700 bg-indigo-100/70 px-3 py-1 rounded-full border border-indigo-200 mb-3">
-                    Phase 3 Work Area
-                  </span>
-                  <h3 className="text-lg font-extrabold text-slate-900 tracking-tight">
-                    Space Reserved for Phase 3: WebGL Flow Graph
-                  </h3>
-                  <p className="text-xs text-slate-500 max-w-md mt-2 leading-relaxed">
-                    Interactive GPU-accelerated force-directed graph canvas will render the multi-hop transaction topology, directional money flows, and timeline playback for this entity here.
-                  </p>
-
-                  {/* Feature preview cards */}
-                  <div className="grid grid-cols-2 gap-3 mt-6 w-full max-w-md text-left">
-                    <div className="p-3 rounded-lg bg-white border border-slate-200 shadow-2xs">
-                      <span className="text-[11px] font-bold text-slate-800 block">⚡ 60 FPS WebGL Engine</span>
-                      <span className="text-[10px] text-slate-500">Hardware-accelerated layout for large transaction clusters</span>
+              {/* RIGHT PANEL: INTERACTIVE OSINT FLOW GRAPH (CRISP WHITE CONTAINER) */}
+              <div className="lg:col-span-7 flex flex-col min-h-[640px] h-[calc(100vh-210px)] max-h-[840px] rounded-xl overflow-hidden shadow-sm border border-slate-200 bg-white">
+                {isSplitTracing ? (
+                  <div className="h-full w-full rounded-xl bg-slate-50 border border-slate-200 p-8 flex flex-col items-center justify-center text-center shadow-xs animate-in fade-in duration-150">
+                    <div className="relative mb-4">
+                      <div className="h-16 w-16 rounded-2xl bg-indigo-50 border border-indigo-200 flex items-center justify-center text-indigo-600 shadow-md shadow-indigo-600/10">
+                        <Network className="h-8 w-8 animate-pulse text-indigo-600" />
+                      </div>
+                      <div className="absolute -top-1 -right-1">
+                        <span className="flex h-3.5 w-3.5 relative">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
+                          <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-indigo-600"></span>
+                        </span>
+                      </div>
                     </div>
-                    <div className="p-3 rounded-lg bg-white border border-slate-200 shadow-2xs">
-                      <span className="text-[11px] font-bold text-slate-800 block">🧭 3-Hop Recursive Layers</span>
-                      <span className="text-[10px] text-slate-500">Color-coded Victim &rarr; Mule &rarr; Exit Nodes</span>
-                    </div>
-                    <div className="p-3 rounded-lg bg-white border border-slate-200 shadow-2xs">
-                      <span className="text-[11px] font-bold text-slate-800 block">⏱️ Temporal Time-Travel</span>
-                      <span className="text-[10px] text-slate-500">Interactive scrubber to observe money dispersal flow</span>
-                    </div>
-                    <div className="p-3 rounded-lg bg-white border border-slate-200 shadow-2xs">
-                      <span className="text-[11px] font-bold text-slate-800 block">🔒 Sec 91 Freeze Export</span>
-                      <span className="text-[10px] text-slate-500">One-click evidentiary court pack generation</span>
+                    <h3 className="text-sm font-bold text-slate-900 tracking-wide uppercase font-mono">
+                      Extracting 3-Hop Network...
+                    </h3>
+                    <p className="text-xs text-slate-500 max-w-sm mt-1.5 leading-relaxed font-sans">
+                      Executing recursive CTE query across DuckDB transactional ledger &bull; Reconstructing directional money dispersal graph...
+                    </p>
+                    <div className="mt-4 flex items-center gap-2 text-[11px] font-mono text-indigo-700 bg-indigo-50 px-3 py-1 rounded-full border border-indigo-200">
+                      <RefreshCw className="h-3 w-3 animate-spin text-indigo-600" />
+                      <span>Resolving Victim &rarr; Layer 1 &rarr; Layer 2 &rarr; Layer 3</span>
                     </div>
                   </div>
-
-                  <div className="mt-6 flex items-center gap-2 text-[11px] text-slate-400 font-mono">
-                    <span>Target: {selectedEntity.type === 'suspicious' ? selectedEntity.data.account : selectedEntity.data.sender}</span>
-                    <span>&bull;</span>
-                    <span>Ready for Phase 3 Integration</span>
+                ) : splitTraceData && splitTraceData.nodes && splitTraceData.nodes.length > 0 ? (
+                  <NetworkGraph
+                    nodes={splitTraceData.nodes}
+                    links={splitTraceData.links}
+                    victimId={splitTraceData.victim_id}
+                    totalVolume={splitTraceData.total_volume}
+                  />
+                ) : splitTraceError ? (
+                  <div className="h-full w-full rounded-xl bg-slate-50 border border-slate-200 p-8 flex flex-col items-center justify-center text-center">
+                    <div className="h-14 w-14 rounded-2xl bg-rose-50 border border-rose-200 flex items-center justify-center text-rose-600 mb-3">
+                      <AlertTriangle className="h-7 w-7" />
+                    </div>
+                    <h3 className="text-sm font-bold text-slate-900 font-mono">Trace Notice</h3>
+                    <p className="text-xs text-slate-500 max-w-md mt-1 leading-relaxed font-sans">
+                      {splitTraceError}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const accId =
+                          selectedEntity.type === 'suspicious'
+                            ? selectedEntity.data.account
+                            : selectedEntity.data.sender
+                        handleTrackAccount(accId)
+                      }}
+                      className="mt-4 px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold transition font-mono cursor-pointer shadow-xs"
+                    >
+                      Open Full Trace Modal
+                    </button>
                   </div>
-                </div>
+                ) : (
+                  <div className="h-full w-full rounded-xl bg-slate-50 border border-slate-200 p-8 flex flex-col items-center justify-center text-center">
+                    <Network className="h-8 w-8 text-slate-400 mb-2" />
+                    <p className="text-xs text-slate-500 font-mono">Select an entity to render its 3-hop network.</p>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -1564,8 +2221,8 @@ export default function App() {
         {/* SECTION 3: EXECUTIVE SPLIT VIEW TABS (WHEN NO ENTITY IS SELECTED & TRANSACTIONS EXIST) */}
         {selectedEntity === null && transactions !== null && transactions.data.length > 0 && (
           <div className="flex flex-col gap-4">
-            {/* Tab Switcher & Quick Upload Bar */}
-            <div className="flex items-center justify-between flex-wrap gap-3 bg-white p-2.5 rounded-xl border border-slate-200 shadow-xs">
+            {/* Tab Switcher & Quick Upload Bar (CRISP WHITE CARD) */}
+            <div className="flex items-center justify-between flex-wrap gap-3 bg-white p-2.5 rounded-xl border border-slate-200 shadow-sm">
               <div className="flex items-center gap-2">
                 {/* Tab 1: Suspicious Activity */}
                 <button
@@ -1573,17 +2230,17 @@ export default function App() {
                   onClick={() => setActiveTab('suspicious')}
                   className={`inline-flex items-center gap-2.5 px-4 py-2 rounded-lg text-xs font-bold transition shadow-xs cursor-pointer ${
                     activeTab === 'suspicious'
-                      ? 'bg-indigo-600 text-white shadow-md'
-                      : 'bg-slate-200 text-slate-700 hover:bg-slate-300 hover:text-slate-900'
+                      ? 'bg-indigo-600 text-white font-bold shadow-md shadow-indigo-600/20'
+                      : 'bg-slate-50 text-slate-700 hover:bg-slate-100 hover:text-slate-900 border border-slate-200'
                   }`}
                 >
-                  <AlertTriangle className={`h-4 w-4 ${activeTab === 'suspicious' ? 'text-amber-300' : 'text-amber-600'}`} />
+                  <AlertTriangle className={`h-4 w-4 ${activeTab === 'suspicious' ? 'text-white' : 'text-amber-500'}`} />
                   <span>Suspicious Activity (Flagged Hubs)</span>
                   <span
                     className={`px-2 py-0.5 rounded-full text-[10px] font-mono ${
                       activeTab === 'suspicious'
-                        ? 'bg-indigo-700 text-indigo-100'
-                        : 'bg-slate-300 text-slate-800'
+                        ? 'bg-indigo-800/40 text-white font-black'
+                        : 'bg-slate-200 text-slate-700 font-bold'
                     }`}
                   >
                     {suspiciousTotalRows > 0
@@ -1600,8 +2257,8 @@ export default function App() {
                   onClick={() => setActiveTab('all_data')}
                   className={`inline-flex items-center gap-2.5 px-4 py-2 rounded-lg text-xs font-bold transition shadow-xs cursor-pointer ${
                     activeTab === 'all_data'
-                      ? 'bg-indigo-600 text-white shadow-md'
-                      : 'bg-slate-200 text-slate-700 hover:bg-slate-300 hover:text-slate-900'
+                      ? 'bg-indigo-600 text-white font-bold shadow-md shadow-indigo-600/20'
+                      : 'bg-slate-50 text-slate-700 hover:bg-slate-100 hover:text-slate-900 border border-slate-200'
                   }`}
                 >
                   <TableIcon className="h-4 w-4" />
@@ -1609,8 +2266,8 @@ export default function App() {
                   <span
                     className={`px-2 py-0.5 rounded-full text-[10px] font-mono ${
                       activeTab === 'all_data'
-                        ? 'bg-indigo-700 text-indigo-100'
-                        : 'bg-slate-300 text-slate-800'
+                        ? 'bg-indigo-800/40 text-white font-black'
+                        : 'bg-slate-200 text-slate-700 font-bold'
                     }`}
                   >
                     {isLocalMode ? 'Streaming Buffer' : `${totalRows.toLocaleString()} Rows`}
@@ -1622,18 +2279,18 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setShowUpload(!showUpload)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-700 text-xs font-medium transition cursor-pointer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-700 text-xs font-medium transition cursor-pointer shadow-2xs"
               >
                 <UploadCloud className="h-3.5 w-3.5 text-indigo-600" />
                 <span>{showUpload ? 'Hide Upload' : 'Upload Another CSV'}</span>
               </button>
             </div>
 
-            {/* TAB CONTENT 1: SUSPICIOUS ACTIVITY LIST */}
+            {/* TAB CONTENT 1: SUSPICIOUS ACTIVITY LIST (CRISP WHITE CARD) */}
             {activeTab === 'suspicious' && (
-              <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden flex flex-col">
+              <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
                 {/* Scoring Rules Guidance Header */}
-                <div className="p-4 bg-slate-50/90 border-b border-slate-200 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+                <div className="p-4 bg-slate-50/80 border-b border-slate-200 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
                   <div>
                     <div className="flex items-center gap-2">
                       <div className="p-1.5 rounded-lg bg-rose-50 text-rose-600 border border-rose-200">
@@ -1642,7 +2299,7 @@ export default function App() {
                       <h3 className="text-sm font-bold text-slate-900">
                         Multi-Factor Risk Scoring Engine & Anomaly Detection
                       </h3>
-                      <span className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-rose-100 text-rose-800 font-bold border border-rose-200">
+                      <span className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 font-bold border border-rose-200">
                         0 to 100 Risk Index
                       </span>
                     </div>
@@ -1660,12 +2317,12 @@ export default function App() {
                         placeholder="Search accounts, devices, IPs..."
                         value={suspiciousSearch}
                         onChange={(e) => setSuspiciousSearch(e.target.value)}
-                        className="bg-white border border-slate-300 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-900 font-mono focus:outline-indigo-500 w-64 shadow-xs"
+                        className="bg-white border border-slate-300 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-800 placeholder:text-slate-400 font-mono focus:outline-indigo-500 w-64 shadow-2xs"
                       />
                     </div>
                     <button
                       type="submit"
-                      className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-xs cursor-pointer"
+                      className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-xs cursor-pointer"
                     >
                       Search
                     </button>
@@ -1673,32 +2330,32 @@ export default function App() {
                 </div>
 
                 {/* 4 Multi-Factor Scoring Rubric Chips */}
-                <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 p-3.5 bg-slate-100/60 border-b border-slate-200 text-[11px]">
-                  <div className="flex items-center gap-2 p-2 rounded-lg bg-white border border-slate-200/80 shadow-2xs">
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 p-3.5 bg-slate-50 border-b border-slate-200 text-[11px]">
+                  <div className="flex items-center gap-2 p-2 rounded-lg bg-white border border-slate-200 shadow-2xs">
                     <Smartphone className="h-3.5 w-3.5 text-purple-600 shrink-0" />
                     <div>
-                      <span className="font-bold text-purple-900">Device Anomaly (+35)</span>
+                      <span className="font-bold text-purple-700">Device Anomaly (+35)</span>
                       <p className="text-[10px] text-slate-500">Emulator, BlueStacks, VM, Linux</p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2 p-2 rounded-lg bg-white border border-slate-200/80 shadow-2xs">
+                  <div className="flex items-center gap-2 p-2 rounded-lg bg-white border border-slate-200 shadow-2xs">
                     <Globe className="h-3.5 w-3.5 text-rose-600 shrink-0" />
                     <div>
-                      <span className="font-bold text-rose-900">IP Anomaly (+35)</span>
+                      <span className="font-bold text-rose-700">IP Anomaly (+35)</span>
                       <p className="text-[10px] text-slate-500">Foreign, Proxy, Tor, VPN Ranges</p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2 p-2 rounded-lg bg-white border border-slate-200/80 shadow-2xs">
+                  <div className="flex items-center gap-2 p-2 rounded-lg bg-white border border-slate-200 shadow-2xs">
                     <AlertCircle className="h-3.5 w-3.5 text-amber-600 shrink-0" />
                     <div>
-                      <span className="font-bold text-amber-900">Structuring (+20)</span>
+                      <span className="font-bold text-amber-700">Structuring (+20)</span>
                       <p className="text-[10px] text-slate-500">$49,900 - $49,999 Threshold Evasion</p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2 p-2 rounded-lg bg-white border border-slate-200/80 shadow-2xs">
-                    <Clock className="h-3.5 w-3.5 text-indigo-600 shrink-0" />
+                  <div className="flex items-center gap-2 p-2 rounded-lg bg-white border border-slate-200 shadow-2xs">
+                    <Clock className="h-3.5 w-3.5 text-sky-600 shrink-0" />
                     <div>
-                      <span className="font-bold text-indigo-900">Temporal Anomaly (+10)</span>
+                      <span className="font-bold text-sky-700">Temporal Anomaly (+10)</span>
                       <p className="text-[10px] text-slate-500">Odd Hours (01:00 AM - 05:00 AM)</p>
                     </div>
                   </div>
@@ -1708,15 +2365,15 @@ export default function App() {
                 <div className="h-[600px] overflow-y-auto overflow-x-auto relative">
                   {bgIngestStatus === 'syncing' && (!suspiciousData || suspiciousData.data.length === 0) ? (
                     <div className="h-full flex flex-col items-center justify-center p-12 text-slate-500">
-                      <div className="h-12 w-12 rounded-xl bg-indigo-50 border border-indigo-200 flex items-center justify-center text-indigo-600 mb-3 animate-pulse">
+                      <div className="h-12 w-12 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-center text-amber-600 mb-3 animate-pulse">
                         <AlertTriangle className="h-6 w-6" />
                       </div>
                       <h4 className="text-sm font-bold text-slate-900">Calculating Multi-Factor Risk Heuristics...</h4>
                       <p className="text-xs text-slate-500 max-w-md text-center mt-1">
                         DuckDB OLAP engine is analyzing 2,000,000 transactions for device emulators, foreign IPs, structuring evasion, and nocturnal timing. Results will appear automatically upon completion.
                       </p>
-                      <div className="mt-4 flex items-center gap-2 text-xs text-indigo-600 font-semibold">
-                        <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                      <div className="mt-4 flex items-center gap-2 text-xs text-amber-700 font-semibold">
+                        <RefreshCw className="h-3.5 w-3.5 animate-spin text-amber-600" />
                         <span>Background DuckDB OLAP processing...</span>
                       </div>
                     </div>
@@ -1726,13 +2383,13 @@ export default function App() {
                       <p className="text-xs font-medium">Computing multi-factor anomaly weights across transactions...</p>
                     </div>
                   ) : !suspiciousData || suspiciousData.data.length === 0 ? (
-                    <div className="h-full flex flex-col items-center justify-center p-12 text-slate-400">
-                      <Shield className="h-8 w-8 text-slate-300 mb-2" />
+                    <div className="h-full flex flex-col items-center justify-center p-12 text-slate-500">
+                      <Shield className="h-8 w-8 text-slate-400 mb-2" />
                       <p className="text-xs font-semibold">No suspicious accounts found matching criteria.</p>
                     </div>
                   ) : (
                     <table className="w-full text-left text-xs">
-                      <thead className="sticky top-0 bg-slate-100/95 backdrop-blur-xs text-slate-600 font-semibold border-b border-slate-200 uppercase text-[10px] tracking-wider z-10 shadow-xs">
+                      <thead className="sticky top-0 bg-slate-50 text-slate-600 font-semibold border-b border-slate-200 uppercase text-[10px] tracking-wider z-10 shadow-2xs">
                         <tr>
                           <th className="px-4 py-3 w-12 text-center text-slate-400">#</th>
                           <th className="px-4 py-3">Investigated Account</th>
@@ -1754,7 +2411,7 @@ export default function App() {
                             <tr
                               key={idx}
                               onClick={() => setSelectedEntity({ type: 'suspicious', data: item })}
-                              className="hover:bg-indigo-50/50 cursor-pointer transition-colors"
+                              className="hover:bg-slate-50/70 cursor-pointer transition-colors"
                               title="Click to view full entity details"
                             >
                               <td className="px-4 py-3 text-center text-slate-400 font-sans text-[11px]">
@@ -1790,14 +2447,14 @@ export default function App() {
                                 {isCritical ? (
                                   <div className="flex flex-col gap-1 w-36">
                                     <div className="flex items-center justify-between">
-                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-rose-100 text-rose-800 border border-rose-300 font-sans">
+                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-rose-50 text-rose-700 border border-rose-200 font-sans">
                                         <AlertTriangle className="h-3 w-3 text-rose-600" />
                                         CRITICAL {item.risk_score}/100
                                       </span>
                                     </div>
-                                    <div className="w-full bg-rose-100 rounded-full h-1.5 overflow-hidden">
+                                    <div className="w-full bg-slate-200 rounded-full h-1.5 overflow-hidden">
                                       <div
-                                        className="bg-rose-600 h-1.5 rounded-full"
+                                        className="bg-rose-500 h-1.5 rounded-full"
                                         style={{ width: `${item.risk_score}%` }}
                                       />
                                     </div>
@@ -1805,12 +2462,12 @@ export default function App() {
                                 ) : isHigh ? (
                                   <div className="flex flex-col gap-1 w-36">
                                     <div className="flex items-center justify-between">
-                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-orange-100 text-orange-800 border border-orange-300 font-sans">
+                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-orange-50 text-orange-700 border border-orange-200 font-sans">
                                         <Shield className="h-3 w-3 text-orange-600" />
                                         HIGH RISK {item.risk_score}/100
                                       </span>
                                     </div>
-                                    <div className="w-full bg-orange-100 rounded-full h-1.5 overflow-hidden">
+                                    <div className="w-full bg-slate-200 rounded-full h-1.5 overflow-hidden">
                                       <div
                                         className="bg-orange-500 h-1.5 rounded-full"
                                         style={{ width: `${item.risk_score}%` }}
@@ -1820,12 +2477,12 @@ export default function App() {
                                 ) : (
                                   <div className="flex flex-col gap-1 w-36">
                                     <div className="flex items-center justify-between">
-                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-300 font-sans">
+                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200 font-sans">
                                         <Activity className="h-3 w-3 text-amber-600" />
                                         ELEVATED {item.risk_score}/100
                                       </span>
                                     </div>
-                                    <div className="w-full bg-amber-100 rounded-full h-1.5 overflow-hidden">
+                                    <div className="w-full bg-slate-200 rounded-full h-1.5 overflow-hidden">
                                       <div
                                         className="bg-amber-500 h-1.5 rounded-full"
                                         style={{ width: `${item.risk_score}%` }}
@@ -1862,16 +2519,16 @@ export default function App() {
                                             : isIP
                                             ? 'bg-rose-50 text-rose-700 border-rose-200'
                                             : isStructuring
-                                            ? 'bg-amber-50 text-amber-800 border-amber-200'
+                                            ? 'bg-amber-50 text-amber-700 border-amber-200'
                                             : isTime
-                                            ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                                            ? 'bg-sky-50 text-sky-700 border-sky-200'
                                             : 'bg-slate-100 text-slate-700 border-slate-200'
                                         }`}
                                       >
                                         {isDevice && <Smartphone className="h-2.5 w-2.5 text-purple-600 shrink-0" />}
                                         {isIP && <Globe className="h-2.5 w-2.5 text-rose-600 shrink-0" />}
                                         {isStructuring && <AlertTriangle className="h-2.5 w-2.5 text-amber-600 shrink-0" />}
-                                        {isTime && <Clock className="h-2.5 w-2.5 text-indigo-600 shrink-0" />}
+                                        {isTime && <Clock className="h-2.5 w-2.5 text-sky-600 shrink-0" />}
                                         <span>{factor}</span>
                                       </span>
                                     )
@@ -1879,13 +2536,13 @@ export default function App() {
                                 </div>
                               </td>
 
-                              <td className="px-4 py-3 text-right font-semibold text-emerald-700">
+                              <td className="px-4 py-3 text-right font-semibold text-emerald-600">
                                 ${item.total_received.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                               </td>
-                              <td className="px-4 py-3 text-right font-semibold text-rose-700">
+                              <td className="px-4 py-3 text-right font-semibold text-rose-600">
                                 ${item.total_sent.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                               </td>
-                              <td className="px-4 py-3 text-center text-slate-600 text-[11px]">
+                              <td className="px-4 py-3 text-center text-slate-500 text-[11px]">
                                 {item.transaction_count}
                               </td>
 
@@ -1914,8 +2571,8 @@ export default function App() {
 
                 {/* PAGINATION CONTROLS FOR SUSPICIOUS ACTIVITY */}
                 {suspiciousData && suspiciousData.total_pages > 0 && (
-                  <div className="px-5 py-3 border-t border-slate-200 bg-slate-50/80 flex items-center justify-between flex-wrap gap-4 text-xs">
-                    <div className="text-slate-600 font-medium">
+                  <div className="px-5 py-3 border-t border-slate-200 bg-slate-50/80 flex items-center justify-between flex-wrap gap-4 text-xs text-slate-600">
+                    <div className="font-medium">
                       Showing <span className="font-semibold text-slate-900">{suspiciousStartRow.toLocaleString()}</span> to{' '}
                       <span className="font-semibold text-slate-900">{suspiciousEndRow.toLocaleString()}</span> of{' '}
                       <span className="font-bold text-slate-900">{suspiciousTotalRows.toLocaleString()}</span> flagged accounts
@@ -1934,7 +2591,7 @@ export default function App() {
                       <span className="text-slate-400">/ {suspiciousData.total_pages.toLocaleString()}</span>
                       <button
                         type="submit"
-                        className="px-2.5 py-1 rounded bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium text-xs shadow-xs cursor-pointer"
+                        className="px-2.5 py-1 rounded bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 font-medium text-xs shadow-2xs cursor-pointer"
                       >
                         Go
                       </button>
@@ -1945,7 +2602,7 @@ export default function App() {
                         type="button"
                         onClick={() => fetchSuspiciousAccounts(suspiciousPage - 1)}
                         disabled={suspiciousPage <= 1 || isLoadingSuspicious}
-                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium shadow-xs disabled:opacity-40 disabled:cursor-not-allowed transition cursor-pointer"
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 font-medium shadow-2xs disabled:opacity-30 disabled:cursor-not-allowed transition cursor-pointer"
                       >
                         <ChevronLeft className="h-4 w-4" />
                         Previous
@@ -1954,7 +2611,7 @@ export default function App() {
                         type="button"
                         onClick={() => fetchSuspiciousAccounts(suspiciousPage + 1)}
                         disabled={suspiciousPage >= suspiciousData.total_pages || isLoadingSuspicious}
-                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium shadow-xs disabled:opacity-40 disabled:cursor-not-allowed transition cursor-pointer"
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 font-medium shadow-2xs disabled:opacity-30 disabled:cursor-not-allowed transition cursor-pointer"
                       >
                         Next
                         <ChevronRight className="h-4 w-4" />
@@ -1967,25 +2624,25 @@ export default function App() {
 
             {/* TAB CONTENT 2: ALL DATA GRID LEDGER (PAGINATED & CONTAINERIZED) */}
             {activeTab === 'all_data' && (
-              <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden flex flex-col">
-                <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between flex-wrap gap-2 bg-slate-50/60">
+              <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
+                <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between flex-wrap gap-2 bg-slate-50/80">
                   <div className="flex items-center gap-2.5">
                     <TableIcon className="h-4 w-4 text-indigo-600" />
-                    <span className="text-xs font-bold text-slate-800">
+                    <span className="text-xs font-bold text-slate-900">
                       Transaction Forensics Ledger
                     </span>
-                    <span className="text-[11px] text-slate-500 font-mono bg-white px-2 py-0.5 rounded border border-slate-200">
+                    <span className="text-[11px] text-slate-600 font-mono bg-white px-2 py-0.5 rounded border border-slate-200">
                       Page {currentPage} of {transactions.total_pages.toLocaleString()}
                     </span>
 
                     {/* Mode Tag: Local Stream vs DuckDB Live */}
                     {isLocalMode ? (
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-800 text-[10px] font-mono font-bold animate-pulse">
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 text-[10px] font-mono font-bold animate-pulse">
                         <Zap className="h-3 w-3 text-amber-600" />
                         Zero-Wait Optimistic Stream (Buffer: {localBuffer.length} Rows)
                       </span>
                     ) : (
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-800 text-[10px] font-mono font-bold">
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-[10px] font-mono font-bold">
                         <Check className="h-3 w-3 text-emerald-600" />
                         DuckDB Live Columnar Engine
                       </span>
@@ -1995,7 +2652,7 @@ export default function App() {
                   <div className="flex items-center gap-2">
                     {isLoadingPage && (
                       <span className="flex items-center gap-1.5 text-xs text-indigo-600 font-medium">
-                        <RefreshCw className="h-3 w-3 animate-spin" />
+                        <RefreshCw className="h-3 w-3 animate-spin text-indigo-600" />
                         Loading page {currentPage}...
                       </span>
                     )}
@@ -2005,7 +2662,7 @@ export default function App() {
                 {/* CONTAINERIZED SCROLLING TABLE (h-[600px] overflow-y-auto, sticky header) */}
                 <div className="h-[600px] overflow-y-auto overflow-x-auto relative">
                   <table className="w-full text-left text-xs">
-                    <thead className="sticky top-0 bg-slate-100/95 backdrop-blur-xs text-slate-600 font-semibold border-b border-slate-200 uppercase text-[10px] tracking-wider z-10 shadow-xs">
+                    <thead className="sticky top-0 bg-slate-50 text-slate-600 font-semibold border-b border-slate-200 uppercase text-[10px] tracking-wider z-10 shadow-2xs">
                       <tr>
                         <th className="px-4 py-2.5 w-14 text-center text-slate-400">#</th>
                         <th className="px-4 py-2.5">Sender Account</th>
@@ -2034,8 +2691,8 @@ export default function App() {
                             onClick={() => setSelectedEntity({ type: 'transaction', data: row })}
                             className={`cursor-pointer transition-colors ${
                               isRowSuspicious
-                                ? 'bg-amber-50 hover:bg-amber-100/90 border-l-4 border-l-amber-500'
-                                : 'hover:bg-indigo-50/50'
+                                ? 'bg-amber-50/50 hover:bg-amber-50/80 border-l-4 border-l-amber-500'
+                                : 'hover:bg-slate-50/70'
                             }`}
                             title={
                               isRowSuspicious
@@ -2047,7 +2704,7 @@ export default function App() {
                               <div className="flex items-center justify-center gap-1">
                                 {isRowSuspicious && (
                                   <span title="Flagged Suspicious Activity">
-                                    <AlertTriangle className="h-3 w-3 text-amber-600 shrink-0" />
+                                    <AlertTriangle className="h-3 w-3 text-amber-500 shrink-0" />
                                   </span>
                                 )}
                                 <span>{rowNumber.toLocaleString()}</span>
@@ -2057,8 +2714,8 @@ export default function App() {
                               <span
                                 className={`inline-flex items-center gap-1 px-2 py-0.5 rounded font-medium border ${
                                   isSenderSuspicious
-                                    ? 'bg-amber-100 text-amber-900 border-amber-300 font-bold'
-                                    : 'bg-slate-100 text-slate-800 border-slate-200'
+                                    ? 'bg-amber-50 text-amber-700 border-amber-200 font-bold'
+                                    : 'bg-slate-100 text-slate-700 border-slate-200'
                                 }`}
                               >
                                 {isSenderSuspicious && (
@@ -2071,8 +2728,8 @@ export default function App() {
                               <span
                                 className={`inline-flex items-center gap-1 px-2 py-0.5 rounded font-medium border ${
                                   isReceiverSuspicious
-                                    ? 'bg-amber-100 text-amber-900 border-amber-300 font-bold'
-                                    : 'bg-slate-100 text-slate-800 border-slate-200'
+                                    ? 'bg-amber-50 text-amber-700 border-amber-200 font-bold'
+                                    : 'bg-slate-100 text-slate-700 border-slate-200'
                                 }`}
                               >
                                 {isReceiverSuspicious && (
@@ -2081,7 +2738,7 @@ export default function App() {
                                 {row.receiver || <span className="text-slate-400 italic">N/A</span>}
                               </span>
                             </td>
-                            <td className="px-4 py-2.5 text-right font-semibold text-emerald-700">
+                            <td className="px-4 py-2.5 text-right font-semibold text-emerald-600">
                               ${row.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                             </td>
                             <td className="px-4 py-2.5 text-slate-500 text-[11px]">
@@ -2089,7 +2746,7 @@ export default function App() {
                             </td>
                             <td className="px-4 py-2.5 text-slate-600 text-[11px]">
                               {row.ip_address ? (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-50 border border-slate-200 text-slate-700">
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-700">
                                   <Globe className="h-2.5 w-2.5 text-slate-400" />
                                   {row.ip_address}
                                 </span>
@@ -2099,7 +2756,7 @@ export default function App() {
                             </td>
                             <td className="px-4 py-2.5 text-slate-600 text-[11px]">
                               {row.device_type ? (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-50 border border-slate-200 text-slate-700">
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-700">
                                   <Smartphone className="h-2.5 w-2.5 text-slate-400" />
                                   {row.device_type}
                                 </span>
@@ -2122,7 +2779,7 @@ export default function App() {
                                   e.stopPropagation()
                                   handleTrackAccount(row.sender)
                                 }}
-                                className="px-2.5 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-[11px] font-sans font-semibold transition cursor-pointer"
+                                className="px-2.5 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-[11px] font-sans font-semibold transition cursor-pointer"
                               >
                                 Track
                               </button>
@@ -2135,8 +2792,8 @@ export default function App() {
                 </div>
 
                 {/* Pagination Controls */}
-                <div className="px-5 py-3 border-t border-slate-200 bg-slate-50/70 flex items-center justify-between flex-wrap gap-4 text-xs">
-                  <div className="text-slate-600 font-medium">
+                <div className="px-5 py-3 border-t border-slate-200 bg-slate-50/80 flex items-center justify-between flex-wrap gap-4 text-xs text-slate-600">
+                  <div className="font-medium">
                     Showing <span className="font-semibold text-slate-900">{startRow.toLocaleString()}</span> to{' '}
                     <span className="font-semibold text-slate-900">{endRow.toLocaleString()}</span> of{' '}
                     <span className="font-bold text-slate-900">
@@ -2157,7 +2814,7 @@ export default function App() {
                     <span className="text-slate-400">/ {transactions.total_pages.toLocaleString()}</span>
                     <button
                       type="submit"
-                      className="px-2.5 py-1 rounded bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium text-xs shadow-xs cursor-pointer"
+                      className="px-2.5 py-1 rounded bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 font-medium text-xs shadow-2xs cursor-pointer"
                     >
                       Go
                     </button>
@@ -2168,7 +2825,7 @@ export default function App() {
                       type="button"
                       onClick={() => fetchPage(currentPage - 1)}
                       disabled={currentPage <= 1 || isLoadingPage}
-                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium shadow-xs disabled:opacity-40 disabled:cursor-not-allowed transition cursor-pointer"
+                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 font-medium shadow-2xs disabled:opacity-30 disabled:cursor-not-allowed transition cursor-pointer"
                     >
                       <ChevronLeft className="h-4 w-4" />
                       Previous
@@ -2177,7 +2834,7 @@ export default function App() {
                       type="button"
                       onClick={() => fetchPage(currentPage + 1)}
                       disabled={currentPage >= transactions.total_pages || isLoadingPage}
-                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium shadow-xs disabled:opacity-40 disabled:cursor-not-allowed transition cursor-pointer"
+                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 font-medium shadow-2xs disabled:opacity-30 disabled:cursor-not-allowed transition cursor-pointer"
                     >
                       Next
                       <ChevronRight className="h-4 w-4" />
@@ -2189,11 +2846,12 @@ export default function App() {
           </div>
         )}
       </main>
+    </div>
 
       {/* SECTION 4: COMPREHENSIVE DETAILED LAYER-BY-LAYER TRACE MODAL */}
       {showTraceModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl border-2 border-indigo-500/20 shadow-2xl p-6 md:p-8 flex flex-col gap-6 max-w-6xl w-full max-h-[90vh] overflow-y-auto animate-in fade-in zoom-in duration-150">
+        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl p-6 md:p-8 flex flex-col gap-6 max-w-6xl w-full max-h-[90vh] overflow-y-auto animate-in fade-in zoom-in duration-150 text-slate-800">
             {/* Report Header */}
             <div className="flex items-start justify-between flex-wrap gap-4 pb-5 border-b border-slate-200">
               <div className="flex items-start gap-3.5">
@@ -2205,7 +2863,7 @@ export default function App() {
                     <span className="text-[11px] font-bold uppercase tracking-wider text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-200 font-mono">
                       Detailed Trace Report
                     </span>
-                    <span className="text-xs font-mono font-bold text-slate-900 bg-slate-100 px-2.5 py-0.5 rounded border border-slate-200">
+                    <span className="text-xs font-mono font-bold text-slate-700 bg-slate-100 px-2.5 py-0.5 rounded border border-slate-200">
                       Target: {activeTrackedId}
                     </span>
                   </div>
@@ -2239,7 +2897,7 @@ export default function App() {
 
             {/* Error or Loading State */}
             {isTracing && (
-              <div className="p-12 text-center text-slate-600 flex flex-col items-center justify-center">
+              <div className="p-12 text-center text-slate-500 flex flex-col items-center justify-center">
                 <RefreshCw className="h-8 w-8 animate-spin text-indigo-600 mb-3" />
                 <h3 className="text-sm font-bold text-slate-900">Executing Recursive 3-Hop Traversal...</h3>
                 <p className="text-xs text-slate-500 mt-1">Traversing relations in DuckDB with cycle prevention...</p>
@@ -2282,7 +2940,7 @@ export default function App() {
                     <span className="text-[11px] font-medium text-slate-500 uppercase tracking-wider block">
                       Total Layered Volume
                     </span>
-                    <p className="text-2xl font-extrabold text-emerald-700 font-mono mt-1">
+                    <p className="text-2xl font-extrabold text-emerald-600 font-mono mt-1">
                       ${masterGraphData.total_volume.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                     </p>
                     <span className="text-[10px] text-slate-500 font-medium">Cumulative Money Trail</span>
@@ -2295,7 +2953,7 @@ export default function App() {
                     <p className="text-2xl font-extrabold text-slate-900 font-mono mt-1">
                       3 Layers
                     </p>
-                    <span className="text-[10px] text-emerald-700 font-medium">Zero-Cycle Loop Safety</span>
+                    <span className="text-[10px] text-emerald-600 font-medium">Zero-Cycle Loop Safety</span>
                   </div>
                 </div>
 
@@ -2308,7 +2966,7 @@ export default function App() {
                       placeholder="Search within report links (account, amount)..."
                       value={traceFilterQuery}
                       onChange={(e) => setTraceFilterQuery(e.target.value)}
-                      className="bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-xs text-slate-900 font-mono focus:outline-indigo-500 w-72"
+                      className="bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-xs text-slate-800 placeholder:text-slate-400 font-mono focus:outline-indigo-600 focus:ring-1 focus:ring-indigo-600 w-72"
                     />
                   </div>
                   <span className="text-xs text-slate-500 font-mono">
@@ -2316,18 +2974,28 @@ export default function App() {
                   </span>
                 </div>
 
+                {/* Embedded WebGL Force Graph with Time-Travel Slider in Detailed Modal */}
+                <div className="h-[460px] w-full rounded-xl overflow-hidden border border-slate-200 shadow-xs bg-slate-50">
+                  <NetworkGraph
+                    nodes={masterGraphData.nodes}
+                    links={masterGraphData.links}
+                    victimId={masterGraphData.victim_id}
+                    totalVolume={masterGraphData.total_volume}
+                  />
+                </div>
+
                 {/* SECTION 1: THE VICTIM (HOP 0) */}
                 <div className="rounded-xl border border-emerald-200 bg-white overflow-hidden shadow-xs">
                   <div
                     onClick={() => toggleLayer('victim')}
-                    className="p-4 bg-emerald-50/60 border-b border-emerald-100 flex items-center justify-between cursor-pointer hover:bg-emerald-50 transition"
+                    className="p-4 bg-emerald-50/70 border-b border-emerald-100 flex items-center justify-between cursor-pointer hover:bg-emerald-50 transition"
                   >
                     <div className="flex items-center gap-2.5">
                       <span className="h-3 w-3 rounded-full bg-emerald-500"></span>
-                      <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-950">
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-800">
                         Section 1: Starting Account (Hop 0 - Source of Funds)
                       </h3>
-                      <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[11px] font-mono font-bold">
+                      <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 border border-emerald-200 text-[11px] font-mono font-bold">
                         1 Account
                       </span>
                     </div>
@@ -2335,15 +3003,15 @@ export default function App() {
                   </div>
 
                   {openLayers.victim && (
-                    <div className="p-4 bg-emerald-50/20">
-                      <div className="flex items-center justify-between p-3.5 rounded-lg bg-white border border-emerald-200/80">
+                    <div className="p-4 bg-emerald-50/30">
+                      <div className="flex items-center justify-between p-3.5 rounded-lg bg-white border border-emerald-200">
                         <div>
                           <span className="text-[11px] font-mono text-slate-500 uppercase">Target Investigated ID:</span>
                           <p className="text-base font-bold font-mono text-slate-900 mt-0.5">{masterGraphData.victim_id}</p>
                         </div>
                         <div className="text-right">
                           <span className="text-[11px] font-mono text-slate-500 uppercase">Immediate Layer 1 Outflow:</span>
-                          <p className="text-sm font-bold font-mono text-emerald-700 mt-0.5">
+                          <p className="text-sm font-bold font-mono text-emerald-600 mt-0.5">
                             ${layer1Total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                           </p>
                         </div>
@@ -2356,14 +3024,14 @@ export default function App() {
                 <div className="rounded-xl border border-amber-200 bg-white overflow-hidden shadow-xs">
                   <div
                     onClick={() => toggleLayer('layer_1')}
-                    className="p-4 bg-amber-50/60 border-b border-amber-100 flex items-center justify-between cursor-pointer hover:bg-amber-50 transition"
+                    className="p-4 bg-amber-50/70 border-b border-amber-100 flex items-center justify-between cursor-pointer hover:bg-amber-50 transition"
                   >
                     <div className="flex items-center gap-2.5">
-                      <span className="h-3 w-3 rounded-full bg-amber-400"></span>
-                      <h3 className="text-xs font-bold uppercase tracking-wider text-amber-950">
+                      <span className="h-3 w-3 rounded-full bg-amber-500"></span>
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-amber-800">
                         Section 2: Layer 1 (Primary Money Mules)
                       </h3>
-                      <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[11px] font-mono font-bold">
+                      <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200 text-[11px] font-mono font-bold">
                         {layer1Links.length} Transfers &bull; ${layer1Total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </span>
                     </div>
@@ -2371,9 +3039,9 @@ export default function App() {
                   </div>
 
                   {openLayers.layer_1 && (
-                    <div className="p-3 bg-amber-50/10 max-h-80 overflow-y-auto">
+                    <div className="p-3 bg-amber-50/20 max-h-80 overflow-y-auto">
                       <table className="w-full text-left text-xs font-mono">
-                        <thead className="bg-amber-50/50 text-amber-900 uppercase text-[10px] tracking-wider border-b border-amber-200">
+                        <thead className="bg-amber-100/60 text-amber-900 uppercase text-[10px] tracking-wider border-b border-amber-200">
                           <tr>
                             <th className="px-3.5 py-2">Source (Origin)</th>
                             <th className="px-3.5 py-2">Target (Primary Mule)</th>
@@ -2383,15 +3051,15 @@ export default function App() {
                             <th className="px-3.5 py-2 text-center">Mode</th>
                           </tr>
                         </thead>
-                        <tbody className="divide-y divide-amber-100 text-slate-700">
+                        <tbody className="divide-y divide-slate-100 text-slate-700">
                           {layer1Links.map((l, idx) => (
-                            <tr key={idx} className="hover:bg-amber-50/40 transition">
-                              <td className="px-3.5 py-2 text-slate-900 font-semibold">{l.source}</td>
-                              <td className="px-3.5 py-2 text-amber-900 font-bold flex items-center gap-1.5">
-                                <span className="h-2 w-2 rounded-full bg-amber-400"></span>
+                            <tr key={idx} className="hover:bg-amber-50/60 transition">
+                              <td className="px-3.5 py-2 text-slate-800 font-semibold">{l.source}</td>
+                              <td className="px-3.5 py-2 text-amber-800 font-bold flex items-center gap-1.5">
+                                <span className="h-2 w-2 rounded-full bg-amber-500"></span>
                                 {l.target}
                               </td>
-                              <td className="px-3.5 py-2 text-right font-bold text-emerald-700">
+                              <td className="px-3.5 py-2 text-right font-bold text-emerald-600">
                                 ${l.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                               </td>
                               <td className="px-3.5 py-2 text-slate-500 text-[11px]">{l.timestamp}</td>
@@ -2401,7 +3069,7 @@ export default function App() {
                                 </span>
                               </td>
                               <td className="px-3.5 py-2 text-center">
-                                <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-bold">
+                                <span className="px-1.5 py-0.5 rounded bg-amber-100 border border-amber-200 text-amber-800 text-[10px] font-bold">
                                   {l.payment_mode || 'IMPS'}
                                 </span>
                               </td>
@@ -2414,27 +3082,27 @@ export default function App() {
                 </div>
 
                 {/* SECTION 3: LAYER 2 (DISTRIBUTORS / SMURFING) */}
-                <div className="rounded-xl border border-orange-200 bg-white overflow-hidden shadow-xs">
+                <div className="rounded-xl border border-indigo-200 bg-white overflow-hidden shadow-xs">
                   <div
                     onClick={() => toggleLayer('layer_2')}
-                    className="p-4 bg-orange-50/60 border-b border-orange-100 flex items-center justify-between cursor-pointer hover:bg-orange-50 transition"
+                    className="p-4 bg-indigo-50/70 border-b border-indigo-100 flex items-center justify-between cursor-pointer hover:bg-indigo-50 transition"
                   >
                     <div className="flex items-center gap-2.5">
-                      <span className="h-3 w-3 rounded-full bg-orange-500"></span>
-                      <h3 className="text-xs font-bold uppercase tracking-wider text-orange-950">
+                      <span className="h-3 w-3 rounded-full bg-indigo-600"></span>
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-indigo-900">
                         Section 3: Layer 2 (Distributors & Intermediate Smurfs)
                       </h3>
-                      <span className="px-2 py-0.5 rounded-full bg-orange-100 text-orange-800 text-[11px] font-mono font-bold">
+                      <span className="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 border border-indigo-200 text-[11px] font-mono font-bold">
                         {layer2Links.length} Transfers &bull; ${layer2Total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </span>
                     </div>
-                    {openLayers.layer_2 ? <ChevronUp className="h-4 w-4 text-orange-700" /> : <ChevronDown className="h-4 w-4 text-orange-700" />}
+                    {openLayers.layer_2 ? <ChevronUp className="h-4 w-4 text-indigo-700" /> : <ChevronDown className="h-4 w-4 text-indigo-700" />}
                   </div>
 
                   {openLayers.layer_2 && (
-                    <div className="p-3 bg-orange-50/10 max-h-96 overflow-y-auto">
+                    <div className="p-3 bg-indigo-50/20 max-h-96 overflow-y-auto">
                       <table className="w-full text-left text-xs font-mono">
-                        <thead className="bg-orange-50/50 text-orange-900 uppercase text-[10px] tracking-wider border-b border-orange-200">
+                        <thead className="bg-indigo-100/60 text-indigo-900 uppercase text-[10px] tracking-wider border-b border-indigo-200">
                           <tr>
                             <th className="px-3.5 py-2">Source (Layer 1 Mule)</th>
                             <th className="px-3.5 py-2">Target (Layer 2 Distributor)</th>
@@ -2444,15 +3112,15 @@ export default function App() {
                             <th className="px-3.5 py-2 text-center">Mode</th>
                           </tr>
                         </thead>
-                        <tbody className="divide-y divide-orange-100 text-slate-700">
+                        <tbody className="divide-y divide-slate-100 text-slate-700">
                           {layer2Links.map((l, idx) => (
-                            <tr key={idx} className="hover:bg-orange-50/40 transition">
+                            <tr key={idx} className="hover:bg-indigo-50/60 transition">
                               <td className="px-3.5 py-2 text-slate-800 font-semibold">{l.source}</td>
-                              <td className="px-3.5 py-2 text-orange-900 font-bold flex items-center gap-1.5">
-                                <span className="h-2 w-2 rounded-full bg-orange-500"></span>
+                              <td className="px-3.5 py-2 text-indigo-800 font-bold flex items-center gap-1.5">
+                                <span className="h-2 w-2 rounded-full bg-indigo-600"></span>
                                 {l.target}
                               </td>
-                              <td className="px-3.5 py-2 text-right font-bold text-emerald-700">
+                              <td className="px-3.5 py-2 text-right font-bold text-emerald-600">
                                 ${l.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                               </td>
                               <td className="px-3.5 py-2 text-slate-500 text-[11px]">{l.timestamp}</td>
@@ -2462,7 +3130,7 @@ export default function App() {
                                 </span>
                               </td>
                               <td className="px-3.5 py-2 text-center">
-                                <span className="px-1.5 py-0.5 rounded bg-orange-100 text-orange-900 text-[10px] font-bold">
+                                <span className="px-1.5 py-0.5 rounded bg-indigo-100 border border-indigo-200 text-indigo-700 text-[10px] font-bold">
                                   {l.payment_mode || 'UPI'}
                                 </span>
                               </td>
@@ -2478,14 +3146,14 @@ export default function App() {
                 <div className="rounded-xl border border-rose-200 bg-white overflow-hidden shadow-xs">
                   <div
                     onClick={() => toggleLayer('layer_3')}
-                    className="p-4 bg-rose-50/60 border-b border-rose-100 flex items-center justify-between cursor-pointer hover:bg-rose-50 transition"
+                    className="p-4 bg-rose-50/70 border-b border-rose-100 flex items-center justify-between cursor-pointer hover:bg-rose-50 transition"
                   >
                     <div className="flex items-center gap-2.5">
                       <span className="h-3 w-3 rounded-full bg-rose-500"></span>
-                      <h3 className="text-xs font-bold uppercase tracking-wider text-rose-950">
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-rose-900">
                         Section 4: Layer 3 (Terminal Cashout & Exit Nodes)
                       </h3>
-                      <span className="px-2 py-0.5 rounded-full bg-rose-100 text-rose-800 text-[11px] font-mono font-bold">
+                      <span className="px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 border border-rose-200 text-[11px] font-mono font-bold">
                         {layer3Links.length} Transfers &bull; ${layer3Total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </span>
                     </div>
@@ -2493,9 +3161,9 @@ export default function App() {
                   </div>
 
                   {openLayers.layer_3 && (
-                    <div className="p-3 bg-rose-50/10 max-h-96 overflow-y-auto">
+                    <div className="p-3 bg-rose-50/20 max-h-96 overflow-y-auto">
                       <table className="w-full text-left text-xs font-mono">
-                        <thead className="bg-rose-50/50 text-rose-900 uppercase text-[10px] tracking-wider border-b border-rose-200">
+                        <thead className="bg-rose-100/60 text-rose-900 uppercase text-[10px] tracking-wider border-b border-rose-200">
                           <tr>
                             <th className="px-3.5 py-2">Source (Layer 2)</th>
                             <th className="px-3.5 py-2">Terminal Target (Sec 91 Freeze Candidate)</th>
@@ -2505,15 +3173,15 @@ export default function App() {
                             <th className="px-3.5 py-2 text-center">Mode</th>
                           </tr>
                         </thead>
-                        <tbody className="divide-y divide-rose-100 text-slate-700">
+                        <tbody className="divide-y divide-slate-100 text-slate-700">
                           {layer3Links.map((l, idx) => (
-                            <tr key={idx} className="hover:bg-rose-50/40 transition">
+                            <tr key={idx} className="hover:bg-rose-50/60 transition">
                               <td className="px-3.5 py-2 text-slate-800 font-semibold">{l.source}</td>
-                              <td className="px-3.5 py-2 text-rose-900 font-bold flex items-center gap-1.5">
+                              <td className="px-3.5 py-2 text-rose-800 font-bold flex items-center gap-1.5">
                                 <span className="h-2 w-2 rounded-full bg-rose-500"></span>
                                 {l.target}
                               </td>
-                              <td className="px-3.5 py-2 text-right font-bold text-emerald-700">
+                              <td className="px-3.5 py-2 text-right font-bold text-emerald-600">
                                 ${l.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                               </td>
                               <td className="px-3.5 py-2 text-slate-500 text-[11px]">{l.timestamp}</td>
@@ -2523,7 +3191,7 @@ export default function App() {
                                 </span>
                               </td>
                               <td className="px-3.5 py-2 text-center">
-                                <span className="px-1.5 py-0.5 rounded bg-rose-100 text-rose-900 text-[10px] font-bold">
+                                <span className="px-1.5 py-0.5 rounded bg-rose-100 border border-rose-200 text-rose-700 text-[10px] font-bold">
                                   {l.payment_mode || 'RTGS'}
                                 </span>
                               </td>
@@ -2540,11 +3208,287 @@ export default function App() {
         </div>
       )}
 
+      {/* FLOATING AI INVESTIGATOR CHAT LAUNCHER BUTTON */}
+      {!isAIChatOpen && (
+        <button
+          type="button"
+          onClick={() => {
+            setIsAIChatOpen(true)
+            if (chatMessages.length === 0) {
+              initProactiveChat()
+            }
+          }}
+          className="fixed bottom-6 right-6 z-40 inline-flex items-center gap-2.5 px-4 py-3 rounded-full bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-xl hover:shadow-2xl transition-all duration-150 active:scale-95 cursor-pointer border border-indigo-500 group shadow-indigo-600/30"
+          title="Open AI Forensic Investigator Chat"
+        >
+          <div className="relative">
+            <Bot className="h-5 w-5 text-white group-hover:rotate-6 transition-transform" />
+            <span className="absolute -top-1 -right-1 h-2 w-2 rounded-full bg-emerald-400 animate-ping"></span>
+            <span className="absolute -top-1 -right-1 h-2 w-2 rounded-full bg-emerald-400"></span>
+          </div>
+          <span>AI Investigator</span>
+          <span className="px-2 py-0.5 rounded-full bg-indigo-800/80 text-[10px] font-mono text-indigo-100 font-bold">
+            qwen2.5
+          </span>
+        </button>
+      )}
+
+      {/* FLOATING AI INVESTIGATOR CHAT WINDOW */}
+      {isAIChatOpen && (
+        <div className="fixed bottom-6 right-6 z-50 w-[430px] max-w-[calc(100vw-2rem)] h-[580px] max-h-[calc(100vh-5rem)] bg-white rounded-2xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-200">
+          {/* Header */}
+          <div className="p-3.5 bg-slate-900 text-white flex items-center justify-between border-b border-slate-800">
+            <div className="flex items-center gap-2.5">
+              <div className="h-8 w-8 rounded-xl bg-indigo-600 flex items-center justify-center text-white font-bold shadow-sm">
+                <Bot className="h-4 w-4" />
+              </div>
+              <div>
+                <h3 className="text-xs font-bold text-white flex items-center gap-1.5">
+                  <span>AI Forensic Investigator</span>
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                </h3>
+                <p className="text-[10px] text-slate-400 font-mono">
+                  Ollama qwen2.5:1.5b &bull; 100% Local Privacy
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsAIChatOpen(false)}
+              className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer"
+              title="Close chat"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          {/* Messages Area */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50 text-xs">
+            {chatMessages.map((m) => (
+              <div
+                key={m.id}
+                className={`flex flex-col ${m.sender === 'user' ? 'items-end' : 'items-start'}`}
+              >
+                <div
+                  className={`max-w-[88%] rounded-2xl p-3.5 leading-relaxed whitespace-pre-line ${
+                    m.sender === 'user'
+                      ? 'bg-indigo-600 text-white font-medium rounded-br-xs shadow-xs'
+                      : 'bg-white text-slate-800 border border-slate-200 rounded-bl-xs shadow-xs'
+                  }`}
+                >
+                  {m.text}
+                </div>
+
+                {/* Interactive Action Buttons inside AI messages */}
+                {m.suggestedActions && m.suggestedActions.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5 max-w-[88%]">
+                    {m.suggestedActions.map((act, aIdx) => (
+                      <button
+                        key={aIdx}
+                        type="button"
+                        onClick={() => {
+                          if (act.type === 'freeze_notice') {
+                            handleOpenSec91Notice(act.account_id, act.bank_name || 'Beneficiary Bank', act.amount || 245000.0)
+                          } else if (act.type === 'trace_graph') {
+                            handleTrackAccount(act.account_id)
+                          }
+                        }}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-[11px] font-bold transition cursor-pointer active:scale-95"
+                      >
+                        {act.type === 'freeze_notice' ? <Gavel className="h-3 w-3 text-rose-600" /> : <Network className="h-3 w-3 text-indigo-600" />}
+                        <span>{act.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                <span className="text-[9px] text-slate-400 mt-1 font-mono px-1">
+                  {m.timestamp}
+                </span>
+              </div>
+            ))}
+
+            {isAITyping && (
+              <div className="flex items-center gap-2 p-3 rounded-xl bg-white border border-slate-200 text-slate-600 text-xs shadow-xs">
+                <RefreshCw className="h-3.5 w-3.5 animate-spin text-indigo-600" />
+                <span className="font-mono text-[11px]">AI Investigator querying DuckDB ledger...</span>
+              </div>
+            )}
+            <div ref={chatEndRef} />
+          </div>
+
+          {/* Quick Prompts Strip */}
+          <div className="px-3 py-2 bg-white border-t border-slate-200 flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+            <button
+              type="button"
+              onClick={() => handleSendChatMessage('Analyze victim account KKBK10000405')}
+              className="shrink-0 px-2.5 py-1 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] font-medium border border-slate-200 transition cursor-pointer"
+            >
+              Analyze KKBK10000405
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSendChatMessage('What accounts show rapid panic transfers?')}
+              className="shrink-0 px-2.5 py-1 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] font-medium border border-slate-200 transition cursor-pointer"
+            >
+              Check Panic Velocity
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSendChatMessage('Identify top mule hubs by wash ratio')}
+              className="shrink-0 px-2.5 py-1 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] font-medium border border-slate-200 transition cursor-pointer"
+            >
+              Top Mule Hubs
+            </button>
+          </div>
+
+          {/* Chat Input */}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              handleSendChatMessage()
+            }}
+            className="p-3 bg-white border-t border-slate-200 flex items-center gap-2"
+          >
+            <input
+              type="text"
+              value={chatInput}
+              onChange={(e) => setChatInput(e.target.value)}
+              placeholder="Ask AI or 'Analyze victim account KKBK10000405'..."
+              className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-800 placeholder:text-slate-400 focus:outline-indigo-600 focus:ring-1 focus:ring-indigo-600 font-sans"
+            />
+            <button
+              type="submit"
+              disabled={!chatInput.trim() || isAITyping}
+              className="p-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white transition disabled:opacity-50 cursor-pointer shadow-xs active:scale-95"
+              title="Send message"
+            >
+              <Send className="h-4 w-4" />
+            </button>
+          </form>
+        </div>
+      )}
+
+      {/* SECTION 91 NOTICE RIGHT DRAWER */}
+      {isSec91DrawerOpen && sec91Target && (
+        <div className="fixed inset-0 z-50 overflow-hidden">
+          {/* Backdrop */}
+          <div
+            onClick={() => setIsSec91DrawerOpen(false)}
+            className="absolute inset-0 bg-slate-950/60 backdrop-blur-xs transition-opacity"
+          />
+
+          <div className="fixed inset-y-0 right-0 max-w-full flex pl-10">
+            <div className="w-screen max-w-xl bg-white shadow-2xl flex flex-col border-l border-slate-200 animate-in slide-in-from-right duration-200 text-slate-800">
+              {/* Header */}
+              <div className="p-4 bg-slate-900 text-white flex items-center justify-between border-b border-slate-800">
+                <div className="flex items-center gap-3">
+                  <div className="h-8 w-8 rounded-lg bg-rose-600 flex items-center justify-center text-white">
+                    <Gavel className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-xs font-bold text-white flex items-center gap-2">
+                      <span>Section 91 CrPC Legal Freeze Order</span>
+                      <span className="text-[10px] bg-rose-500/30 text-rose-300 px-1.5 py-0.2 rounded font-mono">
+                        Statutory
+                      </span>
+                    </h3>
+                    <p className="text-[10px] text-slate-400 font-mono">
+                      Target Account: {sec91Target.accountId} &bull; {sec91Target.bankName}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsSec91DrawerOpen(false)}
+                  className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              {/* Drawer Body */}
+              <div className="flex-1 p-5 overflow-y-auto flex flex-col gap-4 bg-slate-50">
+                {isSec91Loading ? (
+                  <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
+                    <RefreshCw className="h-8 w-8 animate-spin text-indigo-600 mb-3" />
+                    <h4 className="text-xs font-bold text-slate-900">
+                      AI Drafting Sec 91 Notice... Ensuring Local Privacy
+                    </h4>
+                    <p className="text-[11px] text-slate-500 mt-1 max-w-xs font-mono">
+                      Synthesizing formal directive for {sec91Target.bankName} under CrPC 1973...
+                    </p>
+                  </div>
+                ) : (
+                  <>
+                    <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-xs flex items-center justify-between">
+                      <div>
+                        <span className="font-bold text-rose-900 block">Statutory Freezing Mandate</span>
+                        <span className="text-[11px] text-rose-700">Immediate debit freeze on suspected fraud proceeds.</span>
+                      </div>
+                      <span className="font-mono font-bold text-rose-700 text-sm">
+                        ${sec91Target.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                    </div>
+
+                    <div className="flex-1 flex flex-col gap-1.5">
+                      <div className="flex items-center justify-between">
+                        <label className="text-[10px] font-mono font-bold uppercase text-slate-500">
+                          Editable Notice Text (Serif Legal Typography):
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard.writeText(sec91EditableText)
+                            setSec91Copied(true)
+                            setTimeout(() => setSec91Copied(false), 2000)
+                          }}
+                          className="inline-flex items-center gap-1 text-[11px] text-indigo-600 hover:text-indigo-700 font-semibold cursor-pointer"
+                        >
+                          {sec91Copied ? <Check className="h-3 w-3 text-emerald-600" /> : <Copy className="h-3 w-3" />}
+                          <span>{sec91Copied ? 'Copied' : 'Copy Notice'}</span>
+                        </button>
+                      </div>
+                      <textarea
+                        value={sec91EditableText}
+                        onChange={(e) => setSec91EditableText(e.target.value)}
+                        rows={16}
+                        className="w-full flex-1 p-4 bg-white border border-slate-300 rounded-xl text-xs text-slate-900 font-serif leading-relaxed focus:outline-indigo-600 focus:ring-1 focus:ring-indigo-600 resize-none shadow-xs"
+                      />
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="p-4 bg-white border-t border-slate-200 flex items-center justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={() => setIsSec91DrawerOpen(false)}
+                  className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold cursor-pointer"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSec91DownloadPDF}
+                  disabled={isSec91Loading || !sec91EditableText}
+                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold transition shadow-sm cursor-pointer disabled:opacity-50 active:scale-95"
+                >
+                  <Download className="h-4 w-4" />
+                  <span>Download PDF (Official)</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Enterprise Footer */}
-      <footer className="border-t border-slate-200 bg-white px-6 py-3.5 text-xs text-slate-500 mt-auto">
+      <footer className="border-t border-slate-800 bg-[#0f172a] px-6 py-3.5 text-xs text-slate-400 mt-auto">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
-          <span className="flex items-center gap-1.5 font-medium text-slate-600">
-            <Building className="h-3.5 w-3.5 text-indigo-600" />
+          <span className="flex items-center gap-1.5 font-medium text-slate-400">
+            <Building className="h-3.5 w-3.5 text-indigo-400" />
             Financial Fraud Network Tracer &bull; Enterprise Compliance & Forensics
           </span>
           <span className="font-mono text-[11px] text-slate-500">

@@ -10,13 +10,18 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@dagrejs/dagre": "^3.1.1",
     "@tailwindcss/vite": "^4.3.3",
+    "@types/dagre": "^0.7.54",
     "@types/papaparse": "^5.5.2",
+    "@xyflow/react": "^12.12.0",
+    "elkjs": "^0.12.0",
     "jspdf": "^4.2.1",
     "lucide-react": "^1.49.0",
     "papaparse": "^5.7.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "react-draggable": "^4.7.2",
     "react-force-graph-2d": "^1.29.2",
     "tailwindcss": "^4.3.3"
   },

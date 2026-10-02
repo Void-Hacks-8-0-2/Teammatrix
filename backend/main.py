@@ -3,6 +3,7 @@ import shutil
 import tempfile
 import traceback
 from typing import Optional, List
+from datetime import datetime
 from pydantic import BaseModel
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -136,9 +137,9 @@ def get_transactions(
 @app.get("/trace/{victim_id}")
 def trace_victim(victim_id: str):
     """
-    Executes 3-hop recursive CTE from victim account to discover money muling layers.
+    Executes 4-hop network traversal from victim/suspect account to discover money muling layers.
     Returns strictly formatted graph payload:
-      - nodes: [{ id: string, group: number }] (0=Victim, 1=L1, 2=L2, 3=L3)
+      - nodes: [{ id: string, group: number }] (-1=Source of Funds, 0=Target Hub, 1=L1, 2=L2, 3=L3, 4=L4)
       - links: [{ source: string, target: string, amount: float, timestamp: string, hop: number }]
     """
     clean_id = victim_id.strip()
@@ -167,6 +168,21 @@ def trace_victim(victim_id: str):
             status_code=500,
             detail=f"Internal error executing recursive trace: {str(e)}",
         )
+
+
+@app.get("/api/account/{account_id}")
+def get_account_summary(account_id: str):
+    """
+    Returns full forensic summary and threat categorization for any account.
+    Accounts with score < 70 are categorized as Normal or Feeder (Victim).
+    """
+    clean_id = account_id.strip()
+    if not clean_id:
+        raise HTTPException(status_code=400, detail="Account ID cannot be empty.")
+    summary = database.get_account_forensic_summary(clean_id)
+    if not summary or not summary.get("found"):
+        raise HTTPException(status_code=404, detail=f"Account '{clean_id}' not found.")
+    return summary
 
 
 @app.post("/api/upload")
@@ -247,8 +263,14 @@ class GenerateNoticeRequest(BaseModel):
     is_bulk: Optional[bool] = False
 
 
+class ChatMessageItem(BaseModel):
+    role: str
+    content: str
+
+
 class AIChatRequest(BaseModel):
-    message: str
+    message: Optional[str] = None
+    messages: Optional[List[ChatMessageItem]] = None
     account_id: Optional[str] = None
 
 
@@ -267,20 +289,149 @@ def get_top_suspect():
         raise HTTPException(status_code=500, detail=f"Failed to fetch top suspect: {str(e)}")
 
 
+def query_ollama_chat(messages: List[Dict[str, str]], timeout: int = 15) -> Optional[str]:
+    """
+    Helper to query local Ollama /api/chat with full conversational messages array.
+    """
+    import requests
+    try:
+        url = "http://localhost:11434/api/chat"
+        payload = {
+            "model": "qwen2.5:1.5b",
+            "messages": messages,
+            "stream": False,
+        }
+        res = requests.post(url, json=payload, timeout=timeout)
+        if res.status_code == 200:
+            content = res.json().get("message", {}).get("content", "").strip()
+            if content:
+                return content
+    except Exception:
+        pass
+    return None
+
+
 @app.post("/api/ai-chat")
 def ai_chat(req: AIChatRequest):
     """
-    Interactive Cyber Forensics AI Chat Assistant.
-    Parses account ID, fetches comprehensive DuckDB summary, queries Ollama (qwen2.5:1.5b),
+    Interactive Cyber Forensics AI Chat Assistant with full multi-turn conversational memory.
+    Supports Ollama (qwen2.5:1.5b) /api/chat format.
+    Parses account ID, fetches comprehensive DuckDB summary, queries Ollama,
     and returns risk analysis and investigative next steps.
     """
     import re
-    import requests
 
-    msg = req.message.strip()
+    msg = (req.message or "").strip()
+    if not msg and req.messages and len(req.messages) > 0:
+        msg = req.messages[-1].content.strip()
+
     target_account = req.account_id.strip() if req.account_id else None
 
-    # Guardrail 1: Check if transactions table exists and has rows in DuckDB
+    stop_words = {
+        "analyze", "victim", "account", "suspect", "freeze", "notice",
+        "investigate", "report", "please", "thanks", "status", "detail",
+        "details", "check", "urgent", "dataset", "highest", "transaction",
+        "transactions", "transfers", "explain", "pattern", "ledger"
+    }
+
+    # 1. Parse account ID from current message text if not explicitly supplied
+    if not target_account:
+        tokens = re.findall(r'\b[A-Za-z0-9_]{6,25}\b', msg)
+        for t in tokens:
+            if t.lower() not in stop_words and any(c.isdigit() for c in t):
+                target_account = t.strip()
+                break
+
+    # 2. Contextual Memory: Scan previous conversation turns if still not found
+    if not target_account and req.messages:
+        for prev_m in reversed(req.messages[:-1]):
+            prev_tokens = re.findall(r'\b[A-Za-z0-9_]{6,25}\b', prev_m.content)
+            for t in prev_tokens:
+                if t.lower() not in stop_words and any(c.isdigit() for c in t):
+                    target_account = t.strip()
+                    break
+            if target_account:
+                break
+
+    # Build conversation history for Ollama /api/chat
+    ollama_history: List[Dict[str, str]] = []
+    if req.messages and len(req.messages) > 0:
+        for item in req.messages[-10:]:
+            role = "assistant" if item.role in ["assistant", "ai"] else "user"
+            ollama_history.append({"role": role, "content": item.content})
+    else:
+        ollama_history.append({"role": "user", "content": msg})
+
+    # Check for explicit scanning intent
+    is_scan_intent = any(k in msg.lower() for k in ["highest", "top suspect", "top risk", "top mule", "scan", "highest risk", "most suspicious", "top account"])
+
+    # Check for FIR / Case Diary generation intent
+    is_fir_intent = any(k in msg.lower() for k in ["fir", "case diary", "police diary", "crpc", "154", "investigation diary", "case record", "generate fir"])
+
+    # Conversational routing guard:
+    # If no specific account ID, no scan request, and not FIR generation,
+    # pass dynamically to local Ollama /api/chat or natural fallback
+    if not target_account and not is_scan_intent and not is_fir_intent:
+        system_prompt = (
+            "You are an AI Forensic Assistant specialized in financial fraud investigation and AML operations. "
+            "If the user greets you or talks conversationally, reply naturally and concisely. "
+            "Maintain context from earlier conversation turns. Only trigger database scans or investigations "
+            "if the user explicitly asks to analyze an account or the dataset."
+        )
+        chat_payload = [{"role": "system", "content": system_prompt}] + ollama_history
+        reply = query_ollama_chat(chat_payload, timeout=12)
+        if reply:
+            return {
+                "status": "conversational",
+                "account_id": None,
+                "response": reply,
+                "summary": None,
+                "source": "ollama (qwen2.5:1.5b)",
+                "suggested_actions": [
+                    {"type": "scan_ledger", "label": "Scan Highest Risk Suspect"}
+                ]
+            }
+
+        # Dynamic natural conversational fallback when Ollama is offline
+        lower_msg = msg.lower().strip()
+        if re.search(r'\b(hi|hello|hey|good\s*(morning|afternoon|evening)|howdy|greetings|namaste)\b', lower_msg):
+            fallback_reply = (
+                "Hello! I am your **AI Forensic Assistant**. I'm actively monitoring this investigation session and ready to assist you.\n\n"
+                "You can give me any specific account ID to investigate, ask me to scan the ledger for suspicious money laundering anomalies, "
+                "or request a structured **Police FIR & Case Diary**. What would you like to examine?"
+            )
+        elif any(q in lower_msg for q in ["who are you", "what can you do", "help", "features", "capabilities"]):
+            fallback_reply = (
+                "I am an **AI Forensic Assistant** specialized in financial fraud investigation and anti-money laundering (AML) operations.\n\n"
+                "I analyze transaction ledgers, identify 4-hop mule networks, calculate wash ratios and passthrough velocity, "
+                "flag smurfing patterns and nocturnal bursts, and draft statutory Section 91 CrPC freezing directives and Police Case Diaries.\n\n"
+                "Feel free to provide an account number or ask me to scan the current transaction records."
+            )
+        elif any(q in lower_msg for q in ["thanks", "thank you", "ok", "okay", "got it", "cool", "understood", "great"]):
+            fallback_reply = (
+                "Understood! Let me know whenever you're ready to inspect an account, trace fund dispersal, or generate a legal notice."
+            )
+        else:
+            fallback_reply = (
+                f"I received your inquiry regarding \"{msg}\". As an AI Forensic Assistant, I can query our DuckDB ledger in real-time. "
+                f"Feel free to provide an account number to inspect, or ask me to scan the dataset for high-risk accounts."
+            )
+
+        return {
+            "status": "conversational",
+            "account_id": None,
+            "response": fallback_reply,
+            "summary": None,
+            "source": "forensic_engine",
+            "suggested_actions": [
+                {
+                    "type": "scan_ledger",
+                    "label": "Scan Highest Risk Suspect",
+                }
+            ]
+        }
+
+    # Guardrail: Check if transactions table exists and has rows in DuckDB
     info = database.get_table_info()
     if info.get("row_count", 0) == 0:
         return {
@@ -292,20 +443,99 @@ def ai_chat(req: AIChatRequest):
             "suggested_actions": []
         }
 
-    # Parse account ID from message text if not explicitly supplied
-    if not target_account:
-        tokens = re.findall(r'\b[A-Za-z0-9_]{6,25}\b', msg)
-        stop_words = {"analyze", "victim", "account", "suspect", "freeze", "notice", "investigate", "report", "please", "thanks", "status", "detail", "details", "check", "urgent", "dataset"}
-        for t in tokens:
-            if t.lower() not in stop_words and any(c.isdigit() for c in t):
-                target_account = t.strip()
-                break
+    # If generating FIR & Case Diary
+    if is_fir_intent:
+        fir_acc = target_account
+        if not fir_acc:
+            top = database.get_top_suspect()
+            if top:
+                fir_acc = top["account"]
 
-    # If still no account, check if asking about highest risk or top suspect
-    if not target_account and any(k in msg.lower() for k in ["highest", "top", "mule", "risk", "scan", "suspect"]):
+        fir_summary = database.get_account_forensic_summary(fir_acc) if fir_acc else None
+        trace_info = database.trace_victim_network(fir_acc) if fir_acc else None
+
+        acc_label = fir_acc or "TARGET_HUB"
+        total_vol = (fir_summary.get("total_in", 0) + fir_summary.get("total_out", 0)) if fir_summary else 245000.0
+        wash_pct = fir_summary.get("wash_ratio", 98.4) if fir_summary else 98.4
+        ip_addr = fir_summary.get("primary_ip", "185.220.101.5") if fir_summary else "185.220.101.5"
+        device = fir_summary.get("primary_device", "Web_Emulator (Linux_Script)") if fir_summary else "Web_Emulator (Linux_Script)"
+        mules_count = len(trace_info.get("nodes", [])) if trace_info and "nodes" in trace_info else 8
+
+        fir_system = (
+            f"You are a Senior Police Forensic Investigator. Generate a formal, highly detailed Police Case Diary & First Information Report (FIR) "
+            f"under Section 154 CrPC read with Section 91 CrPC for money laundering syndicate hub {acc_label}. "
+            f"Include: Total volume ₹{total_vol:,.2f}, Wash Ratio {wash_pct}%, IP {ip_addr}, Device {device}, {mules_count} Mule nodes, 4 Hops deep."
+        )
+
+        fir_response_text = None
+        source_label = "forensic_engine"
+        fir_messages = [{"role": "system", "content": fir_system}] + ollama_history
+        reply = query_ollama_chat(fir_messages, timeout=25)
+        if reply:
+            fir_response_text = reply
+            source_label = "ollama (qwen2.5:1.5b)"
+
+        if not fir_response_text:
+            fir_response_text = (
+                f"### 📋 STATUTORY POLICE CASE DIARY & FIRST INFORMATION REPORT (FIR)\n"
+                f"**Cyber Crime Police Station &bull; Financial Intelligence & Cyber Forensics Division**\n"
+                f"**FIR No:** CY/2026/0942/FIR &bull; **Police Station:** State Cyber Cell &bull; **Date:** {datetime.now().strftime('%d-%b-%Y')}\n"
+                f"**Statutory Sections:** Section 154 & Section 91 Code of Criminal Procedure (CrPC), 1973 r/w Sec 66D Information Technology Act & Sec 420/120B IPC\n\n"
+                f"---\n\n"
+                f"#### 1. SUSPECT SYNDICATE PROFILE & PRIMARY TARGET HUB\n"
+                f"• **Target Entity Hub:** `{acc_label}` ({acc_label[:4] if len(acc_label)>=4 else 'COMM'} Bank)\n"
+                f"• **Investigated Role:** Layering, Aggregation & Mule Dispersal Hub\n"
+                f"• **Total Laundering Dispersal:** **₹{total_vol:,.2f}**\n"
+                f"• **Wash Passthrough Ratio:** **{wash_pct}%** (Immediate outflow dissipation within 24h)\n"
+                f"• **Associated Technical Indicators:** IP `{ip_addr}` (Flagged Anomaly 185.% / 194.%) &bull; Client: `{device}`\n\n"
+                f"#### 2. CHRONOLOGY OF 4-HOP TRANSACTIONAL TRAIL\n"
+                f"• **Hop -1 (Source of Funds / Feeders):** Inbound victim funds deposited via cyber deceit and unverified transfers into target hub `{acc_label}`.\n"
+                f"• **Hop 1 (Primary Money Mules):** Immediate dispersal executed within minutes into primary relay mule accounts, bypassing threshold alerts.\n"
+                f"• **Hop 2 (Distributor Accounts):** Secondary fragmentation into smaller tranches (₹49,000–₹49,999) across multiple regional commercial banks.\n"
+                f"• **Hop 3 (Aggregation Layer):** Intermediary consolidation hubs regrouping split funds for final exit.\n"
+                f"• **Hop 4 (Terminal Cashout):** Final diversion into ATM cash withdrawals, cryptocurrency OTC/P2P desks, and offshore forex gateways.\n\n"
+                f"#### 3. STATUTORY DIRECTIVES & FREEZING ORDERS (SEC 91 CrPC)\n"
+                f"1. **Debit-Freeze Mandate:** All beneficiary banks are directed to execute immediate, unconditional debit-freeze on `{acc_label}` and all connected {mules_count} downstream accounts.\n"
+                f"2. **Evidence Preservation:** Preserve 90-day KYC dossiers, account opening signature cards, IP session logs, and ATM CCTV footage.\n"
+                f"3. **Investigating Officer Note:** Dispersal graph and evidentiary ledger preserved in forensic master state for judicial cognizance."
+            )
+
+        return {
+            "status": "success",
+            "account_id": acc_label,
+            "response": fir_response_text,
+            "summary": fir_summary,
+            "source": source_label,
+            "suggested_actions": [
+                {
+                    "type": "freeze_notice",
+                    "label": f"Draft Sec 91 Notice ({acc_label})",
+                    "account_id": acc_label,
+                    "bank_name": "Beneficiary Bank",
+                    "amount": total_vol,
+                },
+                {
+                    "type": "trace_graph",
+                    "label": f"View 4-Hop Dispersal Graph ({acc_label})",
+                    "account_id": acc_label,
+                }
+            ]
+        }
+
+    # If asking for top suspect scan without a specific account
+    if not target_account and is_scan_intent:
         top = database.get_top_suspect()
         if top:
             target_account = top["account"]
+        else:
+            return {
+                "status": "no_suspects",
+                "account_id": None,
+                "response": "Active dataset scanned. No high-risk laundering entities or suspicious transaction patterns detected in current records.",
+                "summary": None,
+                "source": "forensic_engine",
+                "suggested_actions": []
+            }
 
     summary = None
     if target_account:
@@ -334,34 +564,23 @@ def ai_chat(req: AIChatRequest):
             f"Timestamp Outflow Window: {summary['min_out_ts']} to {summary['max_out_ts']}"
         )
 
-        prompt = (
-            f"You are an expert financial forensic investigator. Analyze the following account data dynamically and conversationally. "
-            f"Explain WHY each metric — the Wash Ratio, the Structuring pattern, the Off-hours activity, the device fingerprint — is suspicious. "
-            f"Do NOT just spit out a rigid template. Be insightful: make connections between these signals, explain what they reveal about the suspect's behavior, "
-            f"and conclude with ONE specific recommended next human action the investigator should take right now.\n\n"
-            f"Account Data:\n{summary_data}"
+        account_system = (
+            f"You are an expert financial forensic investigator. Analyze the following account data dynamically and conversationally.\n"
+            f"Connect these signals: explain WHY the Wash Ratio ({summary['wash_ratio']}%), structuring across {summary['unique_receivers']} recipients, "
+            f"and device/IP fingerprints reveal mule network activity.\n"
+            f"Conclude with ONE specific recommended next human action the investigator should take right now.\n\n"
+            f"Forensic Evidence for Account {summary['account']}:\n{summary_data}"
         )
 
         ai_response_text = None
         source_label = "forensic_engine"
 
-        # Try local Ollama
-        try:
-            ollama_url = "http://localhost:11434/api/generate"
-            ollama_payload = {
-                "model": "qwen2.5:1.5b",
-                "prompt": prompt,
-                "stream": False,
-            }
-            res = requests.post(ollama_url, json=ollama_payload, timeout=20)
-            if res.status_code == 200:
-                data = res.json()
-                reply = data.get("response", "").strip()
-                if reply:
-                    ai_response_text = reply
-                    source_label = "ollama (qwen2.5:1.5b)"
-        except Exception:
-            pass
+        # Query Ollama /api/chat with full conversational history
+        analysis_messages = [{"role": "system", "content": account_system}] + ollama_history
+        reply = query_ollama_chat(analysis_messages, timeout=25)
+        if reply:
+            ai_response_text = reply
+            source_label = "ollama (qwen2.5:1.5b)"
 
         # Statutory Forensic Engine Fallback if Ollama is not active
         if not ai_response_text:
@@ -387,7 +606,7 @@ def ai_chat(req: AIChatRequest):
                 f"**The device fingerprint from `{device}` (IP: `{ip}`) adds the tech fraud signature.** When you see emulator or automation tooling associated with a financial account, "
                 f"it almost always means scripted transfers — not a human sitting at a branch. This level of automation suggests organized cyber fraud.\n\n"
                 f"**My recommended next action:** Issue an immediate Section 91 CrPC freezing directive on `{acc}` to halt any remaining outbound dissipation, "
-                f"then expand the 3-hop graph to trace where those {receivers} recipients are sending the money next. The clock is ticking — structured funds typically reach cash-out terminals within 24-48 hours. "
+                f"then expand the 4-hop graph to trace where those {receivers} recipients are sending the money next. The clock is ticking — structured funds typically reach cash-out terminals within 24-48 hours. "
                 f"Risk Score: **{score}%**."
             )
 
@@ -408,69 +627,25 @@ def ai_chat(req: AIChatRequest):
                 },
                 {
                     "type": "trace_graph",
-                    "label": f"Trace Network ({summary['account']})",
+                    "label": f"Trace 4-Hop Network ({summary['account']})",
                     "account_id": summary["account"],
                 },
             ],
         }
 
-    # General questions or proactive assistant responses
-    top = database.get_top_suspect()
-    if not top:
-        return {
-            "status": "no_suspects",
-            "account_id": None,
-            "response": "Active dataset scanned. No high-risk laundering entities or suspicious transaction patterns detected in current records.",
-            "summary": None,
-            "source": "forensic_engine",
-            "suggested_actions": []
-        }
-
-    top_acc = top["account"]
-    top_score = top["risk_score"]
-    top_amt = top["total_in"] if top.get("total_in") and top["total_in"] > 0 else top.get("total_out", 0.0)
-
-    general_prompt = (
-        f"You are a cyber forensics AI. A financial crime investigator asks: '{msg}'. "
-        f"Analyze this transaction data. Highlight key risks (like velocity or structuring) and suggest the next investigative step. Be analytical. "
-        f"Context: The highest risk flagged account in current ledger is {top_acc} with a {top_score}% risk score and volume of ₹{top_amt:,.2f}."
-    )
-
-    general_text = None
-    try:
-        res = requests.post("http://localhost:11434/api/generate", json={"model": "qwen2.5:1.5b", "prompt": general_prompt, "stream": False}, timeout=15)
-        if res.status_code == 200:
-            general_text = res.json().get("response", "").strip()
-    except Exception:
-        pass
-
-    if not general_text:
-        general_text = (
-            f"I have scanned the active ledger. Priority target `{top_acc}` exhibits a **{top_score}% risk score** "
-            f"with ₹{top_amt:,.2f} in observed volume. Signature indicates rapid passthrough and smurfing distribution. "
-            f"Would you like me to generate a Section 91 CrPC freeze notice or trace its 3-hop money trail?"
-        )
-
+    # Fallback conversational response
     return {
-        "status": "success",
-        "account_id": top_acc,
-        "response": general_text,
+        "status": "conversational",
+        "account_id": None,
+        "response": "I'm ready to assist with your investigation. Please provide an account ID (e.g. `Analyze account KKBK10000405`) or ask me to scan for suspicious money laundering activity.",
         "summary": None,
         "source": "forensic_engine",
         "suggested_actions": [
             {
-                "type": "freeze_notice",
-                "label": f"Draft Sec 91 Notice ({top_acc})",
-                "account_id": top_acc,
-                "bank_name": "Beneficiary Bank",
-                "amount": top_amt,
-            },
-            {
-                "type": "trace_graph",
-                "label": f"Trace Network ({top_acc})",
-                "account_id": top_acc,
-            },
-        ],
+                "type": "scan_ledger",
+                "label": "Scan Highest Risk Suspect",
+            }
+        ]
     }
 
 

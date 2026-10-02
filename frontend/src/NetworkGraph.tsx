@@ -9,7 +9,6 @@ import {
   Position,
   MarkerType,
   BaseEdge,
-  EdgeLabelRenderer,
   getBezierPath,
   ReactFlowProvider,
   useReactFlow,
@@ -194,6 +193,17 @@ const LAYER_STYLES: Record<number, LayerStyle> = {
     label: 'LAYER 3 TERMINAL',
     badgeLabel: 'HOP 3',
   },
+  4: {
+    border: 'border-purple-400 hover:border-purple-500',
+    bg: 'bg-white',
+    headerBg: 'bg-purple-50 border-b border-purple-100',
+    headerText: 'text-purple-900',
+    badgeText: 'bg-purple-100 text-purple-800 border-purple-200 font-bold',
+    dotColor: '#a855f7',
+    edgeColor: '#9333ea',
+    label: 'LAYER 4 CASHOUT',
+    badgeLabel: 'HOP 4',
+  },
 }
 
 // --- CUSTOM NODE: CRISP WHITE CARD WITH INTERACTIVE EXPAND/COLLAPSE & SIDE PANEL INSPECTION ---
@@ -211,6 +221,7 @@ interface AccountNodeData {
   inboundTotal?: number
   outboundTotal?: number
   retainedBalance?: number
+  isFocused?: boolean
   onNodeInteraction?: (id: string, group: number, event: React.MouseEvent) => void
   onToggleExpand?: (id: string) => void
 }
@@ -234,6 +245,7 @@ function AccountCardNode({ data, selected }: NodeProps) {
   const isExpanded = !!nodeData?.isExpanded
   const hasChildren = childCount > 0
   const isCashOut = !!nodeData?.isCashOut
+  const isFocused = !!nodeData?.isFocused
 
   // Dynamic icon for terminal cashout exit categories
   const CashIcon =
@@ -263,7 +275,13 @@ function AccountCardNode({ data, selected }: NodeProps) {
       }}
       className={`forensic-node-enter relative rounded-xl border-2 transition-all duration-200 select-none cursor-pointer bg-white text-slate-800 shadow-sm hover:shadow-md ${
         isCashOut ? 'border-rose-400 hover:border-rose-500 ring-1 ring-rose-400/40' : style.border
-      } ${selected ? 'ring-2 ring-indigo-500 ring-offset-2 scale-102 shadow-indigo-500/20' : 'hover:scale-[1.01]'}`}
+      } ${
+        isFocused
+          ? 'ring-2 ring-indigo-500 ring-offset-2 scale-102 shadow-indigo-500/30 shadow-lg'
+          : selected
+          ? 'ring-2 ring-indigo-500 ring-offset-2 scale-102 shadow-indigo-500/20'
+          : 'hover:scale-[1.01]'
+      }`}
       style={{ width: 260, minHeight: 124 }}
     >
       {/* Target handle on LEFT edge for incoming money flow */}
@@ -425,16 +443,12 @@ function MoneyFlowEdge({
   targetY,
   style = {},
   markerEnd,
-  data,
-  selected,
 }: EdgeProps) {
-  const edgeData = data as unknown as MoneyFlowEdgeData | undefined
-
   // Sweeping organic Bezier curve directly connecting parent right handle to child left handle
   const deltaY = Math.abs(targetY - sourceY)
   const curvature = deltaY > 300 ? 0.38 : deltaY > 150 ? 0.32 : 0.28
 
-  const [edgePath, labelX, labelY] = getBezierPath({
+  const [edgePath] = getBezierPath({
     sourceX,
     sourceY,
     sourcePosition: Position.Right,
@@ -444,63 +458,17 @@ function MoneyFlowEdge({
     curvature,
   })
 
-  const formattedAmt = edgeData?.formattedAmount || '₹0.00'
-  const timestamp = edgeData?.timestamp || ''
-
-  const hopColor =
-    edgeData?.hop === -1
-      ? 'border-emerald-200 text-emerald-700 bg-emerald-50'
-      : edgeData?.hop === 1
-      ? 'border-indigo-200 text-indigo-700 bg-indigo-50'
-      : edgeData?.hop === 2
-      ? 'border-amber-200 text-amber-700 bg-amber-50'
-      : 'border-rose-200 text-rose-700 bg-rose-50'
-
   return (
-    <>
-      <BaseEdge
-        id={id}
-        path={edgePath}
-        style={{
-          ...style,
-          strokeDasharray: '6 4',
-          animation: 'moneyFlowAnim 0.85s linear infinite',
-        }}
-        markerEnd={markerEnd}
-      />
-      <EdgeLabelRenderer>
-        <div
-          style={{
-            position: 'absolute',
-            transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`,
-            pointerEvents: 'all',
-          }}
-          className={`nodrag nopan group cursor-pointer flex flex-col items-center justify-center bg-white border ${
-            selected ? 'border-indigo-500 ring-2 ring-indigo-500/30' : 'border-slate-200 hover:border-indigo-400'
-          } shadow-md rounded-lg px-2.5 py-1 select-none transition-all duration-150 z-20 hover:shadow-lg`}
-          onClick={(e) => {
-            e.stopPropagation()
-            if (edgeData?.onEdgeClick) {
-              edgeData.onEdgeClick(edgeData, e)
-            }
-          }}
-        >
-          <div className="flex items-center gap-1.5">
-            <span className="text-[11px] font-mono font-extrabold text-slate-900 tracking-tight whitespace-nowrap">
-              {formattedAmt}
-            </span>
-            <span className={`text-[8px] font-mono font-bold px-1 py-0.2 rounded border ${hopColor}`}>
-              {edgeData?.hop === -1 ? 'SRC' : `H${edgeData?.hop || 1}`}
-            </span>
-          </div>
-          {timestamp && (
-            <div className="text-[9px] font-mono text-slate-500 tracking-tighter whitespace-nowrap">
-              {timestamp.includes(' ') ? timestamp.split(' ')[1] : timestamp}
-            </div>
-          )}
-        </div>
-      </EdgeLabelRenderer>
-    </>
+    <BaseEdge
+      id={id}
+      path={edgePath}
+      style={{
+        ...style,
+        strokeDasharray: '6 4',
+        animation: 'moneyFlowAnim 0.85s linear infinite',
+      }}
+      markerEnd={markerEnd}
+    />
   )
 }
 
@@ -588,32 +556,91 @@ function NetworkGraphInner({
   const [selectedNodeDetail, setSelectedNodeDetail] = useState<SelectedNodeDetail | null>(null)
 
   // React Flow instance hooks
-  const { fitView, setCenter } = useReactFlow()
+  const { fitView, getNode, setCenter } = useReactFlow()
   const isInitialFitDoneRef = useRef(false)
 
-  // Normalize incoming nodes with clean IDs
-  const normalizedNodes = useMemo(() => {
-    return nodes.map((n) => ({
-      ...n,
-      id: cleanId(n.id),
-      group: typeof n.group === 'number' ? n.group : 0,
-    }))
-  }, [nodes])
+  // Normalize incoming nodes with clean IDs and robust group extraction
+  const cleanVictimId = cleanId(_victimId)
 
-  // Normalize incoming links with clean IDs
+  // Normalize incoming nodes with clean IDs, authoritative root first, and complete unique collection
+  const normalizedNodes = useMemo(() => {
+    const nodeMap = new Map<string, GraphNode>()
+
+    // 1. Map Root Node FIRST
+    if (cleanVictimId) {
+      nodeMap.set(cleanVictimId, { id: cleanVictimId, group: 0 })
+    }
+
+    // 2. Map all explicitly provided nodes
+    nodes.forEach((n) => {
+      const id = cleanId(n.id)
+      if (!id) return
+      let g = 0
+      if (cleanVictimId && id === cleanVictimId) {
+        g = 0
+      } else if (typeof n.group === 'number') {
+        g = n.group
+      } else if (n.group !== undefined && !isNaN(Number(n.group))) {
+        g = Number(n.group)
+      } else if ((n as any).hop !== undefined && !isNaN(Number((n as any).hop))) {
+        g = Number((n as any).hop)
+      } else if ((n as any).hop_level !== undefined && !isNaN(Number((n as any).hop_level))) {
+        g = Number((n as any).hop_level)
+      }
+      nodeMap.set(id, { ...n, id, group: g })
+    })
+
+    // 3. Infer missing endpoints from links so NO nodes or hops are ever dropped
+    links.forEach((l) => {
+      const s = cleanId(l.source)
+      const t = cleanId(l.target)
+      let linkHop = 1
+      if (typeof l.hop === 'number') linkHop = l.hop
+      else if (typeof l.hop_level === 'number') linkHop = l.hop_level
+      else if (l.hop !== undefined && !isNaN(Number(l.hop))) linkHop = Number(l.hop)
+      else if (l.hop_level !== undefined && !isNaN(Number(l.hop_level))) linkHop = Number(l.hop_level)
+
+      if (s && !nodeMap.has(s)) {
+        const sGroup = cleanVictimId && s === cleanVictimId ? 0 : linkHop === -1 ? -1 : Math.max(0, linkHop - 1)
+        nodeMap.set(s, { id: s, group: sGroup })
+      }
+      if (t && !nodeMap.has(t)) {
+        const tGroup = cleanVictimId && t === cleanVictimId ? 0 : linkHop === -1 ? 0 : linkHop
+        nodeMap.set(t, { id: t, group: tGroup })
+      }
+    })
+
+    // Guarantee root node group 0 if no victim ID was given
+    if (!cleanVictimId && nodeMap.size > 0) {
+      const existingRoot = Array.from(nodeMap.values()).find((n) => n.group === 0) || Array.from(nodeMap.values())[0]
+      if (existingRoot) {
+        nodeMap.set(existingRoot.id, { ...existingRoot, group: 0 })
+      }
+    }
+
+    return Array.from(nodeMap.values())
+  }, [nodes, links, cleanVictimId])
+
+  // Normalize incoming links with clean IDs and robust hop depth
   const normalizedLinks = useMemo(() => {
     return links
-      .map((l) => ({
-        ...l,
-        source: cleanId(l.source),
-        target: cleanId(l.target),
-        amount: Number(l.amount) || 0,
-        hop: Number(l.hop) || 1,
-      }))
+      .map((l) => {
+        let h = 1
+        if (typeof l.hop === 'number') h = l.hop
+        else if (typeof l.hop_level === 'number') h = l.hop_level
+        else if (l.hop !== undefined && !isNaN(Number(l.hop))) h = Number(l.hop)
+        else if (l.hop_level !== undefined && !isNaN(Number(l.hop_level))) h = Number(l.hop_level)
+        return {
+          ...l,
+          source: cleanId(l.source),
+          target: cleanId(l.target),
+          amount: Number(l.amount) || 0,
+          hop: h,
+          hop_level: h,
+        }
+      })
       .filter((l) => l.source !== '' && l.target !== '')
   }, [links])
-
-  const cleanVictimId = cleanId(_victimId)
 
   // Locate the authoritative Root Victim node
   const rootNode = useMemo(() => {
@@ -627,25 +654,28 @@ function NetworkGraphInner({
   const rootId = rootNode ? cleanId(rootNode.id) : cleanVictimId
 
   // --- AUTO-EXPAND ON MOUNT: ALL LAYERS (1, 2, 3) EXPANDED IMMEDIATELY ---
-  const [expandedNodeIds, setExpandedNodeIds] = useState<Set<string>>(() => {
-    const allIds = new Set<string>()
-    normalizedLinks.forEach((l) => allIds.add(cleanId(l.source)))
-    normalizedNodes.forEach((n) => allIds.add(cleanId(n.id)))
-    if (rootId) allIds.add(rootId)
-    return allIds
-  })
+  // We track collapsedNodeIds (explicitly collapsed nodes). By default empty = 100% of layers expanded!
+  const [collapsedNodeIds, setCollapsedNodeIds] = useState<Set<string>>(new Set())
 
-  // Re-expand all nodes whenever new dataset is loaded
+  // Reset collapsed nodes whenever new dataset is loaded
   useEffect(() => {
-    const allIds = new Set<string>()
-    normalizedLinks.forEach((l) => allIds.add(cleanId(l.source)))
-    normalizedNodes.forEach((n) => allIds.add(cleanId(n.id)))
-    if (rootId) allIds.add(rootId)
-    setExpandedNodeIds(allIds)
+    setCollapsedNodeIds(new Set())
     setHighlightedPathNodeId(null)
     setSelectedNodeDetail(null)
     isInitialFitDoneRef.current = false
   }, [rootId, normalizedLinks, normalizedNodes])
+
+  // Computed expandedNodeIds for card body buttons & compatibility
+  const expandedNodeIds = useMemo(() => {
+    const all = new Set<string>()
+    normalizedNodes.forEach((n) => {
+      if (!collapsedNodeIds.has(n.id)) all.add(n.id)
+    })
+    normalizedLinks.forEach((l) => {
+      if (!collapsedNodeIds.has(l.source)) all.add(l.source)
+    })
+    return all
+  }, [normalizedNodes, normalizedLinks, collapsedNodeIds])
 
   // Build parent-to-child and incoming links lookup maps with clean IDs
   const { childMap, incomingLinksByTarget } = useMemo(() => {
@@ -666,6 +696,34 @@ function NetworkGraphInner({
 
     return { childMap: children, incomingLinksByTarget: incoming }
   }, [normalizedLinks])
+
+  // --- BFS TRAVERSAL ENGINE TO COLLECT ALL DOWNSTREAM DESCENDANTS ---
+  const getDownstreamDescendants = useCallback(
+    (startId: string): string[] => {
+      const cleanStart = cleanId(startId)
+      const descendants: string[] = []
+      const queue: string[] = [cleanStart]
+      const visited = new Set<string>([cleanStart])
+
+      while (queue.length > 0) {
+        const curr = queue.shift()!
+        const children = childMap[curr]
+        if (children) {
+          children.forEach((childId) => {
+            const cleanChild = cleanId(childId)
+            if (!visited.has(cleanChild)) {
+              visited.add(cleanChild)
+              descendants.push(cleanChild)
+              queue.push(cleanChild)
+            }
+          })
+        }
+      }
+
+      return descendants
+    },
+    [childMap]
+  )
 
   // Autoplay step state (number of chronological links revealed)
   const [autoplayCount, setAutoplayCount] = useState<number | null>(null)
@@ -689,12 +747,12 @@ function NetworkGraphInner({
   const handleToggleNodeExpand = useCallback((nodeId: string) => {
     const clean = cleanId(nodeId)
     setAutoplayCount(null)
-    setExpandedNodeIds((prev) => {
+    setCollapsedNodeIds((prev) => {
       const next = new Set(prev)
       if (next.has(clean)) {
-        next.delete(clean)
+        next.delete(clean) // was collapsed, now expand
       } else {
-        next.add(clean)
+        next.add(clean) // was expanded, now collapse
       }
       return next
     })
@@ -703,19 +761,21 @@ function NetworkGraphInner({
   // Global Expand All: reveal all Hop 1, 2, and 3 nodes
   const handleExpandAll = useCallback(() => {
     setAutoplayCount(null)
-    const allParentIds = new Set<string>()
-    normalizedLinks.forEach((l) => allParentIds.add(cleanId(l.source)))
-    normalizedNodes.forEach((n) => allParentIds.add(cleanId(n.id)))
-    setExpandedNodeIds(allParentIds)
-  }, [normalizedLinks, normalizedNodes])
+    setCollapsedNodeIds(new Set())
+  }, [])
 
-  // Global Collapse to Root: hide everything except Hop 0 and Hop 1
+  // Global Collapse to Root: collapse everything except root
   const handleCollapseToRoot = useCallback(() => {
     setAutoplayCount(null)
-    const rootSet = new Set<string>()
-    if (rootId) rootSet.add(rootId)
-    setExpandedNodeIds(rootSet)
-  }, [rootId])
+    const collapsed = new Set<string>()
+    normalizedNodes.forEach((n) => {
+      if (n.id !== rootId && n.group !== -1) collapsed.add(n.id)
+    })
+    normalizedLinks.forEach((l) => {
+      if (l.source !== rootId && l.hop !== -1) collapsed.add(l.source)
+    })
+    setCollapsedNodeIds(collapsed)
+  }, [rootId, normalizedNodes, normalizedLinks])
 
   // Fullscreen toggle handler with HTML5 API fallback
   const toggleFullscreen = () => {
@@ -810,12 +870,14 @@ function NetworkGraphInner({
     }
   }, [normalizedLinks])
 
-  // Time-travel scrubber state
-  const [sliderTime, setSliderTime] = useState<number>(timeMetrics.max)
+  // Time-travel scrubber state (activeHorizon)
+  const [activeHorizon, setActiveHorizon] = useState<number>(timeMetrics.max)
+  const sliderTime = activeHorizon
+  const setSliderTime = setActiveHorizon
 
   // Reset slider whenever new dataset is loaded
   useEffect(() => {
-    setSliderTime(timeMetrics.max)
+    setActiveHorizon(timeMetrics.max)
     setIsPlaying(false)
     setAutoplayCount(null)
     setTooltip(null)
@@ -882,162 +944,92 @@ function NetworkGraphInner({
     return () => clearInterval(interval)
   }, [isPlaying, autoplayIntervalMs, sortedLinks])
 
-  // Keep sliderTime synchronized with autoplay progress
+  // Keep activeHorizon synchronized with autoplay progress
   useEffect(() => {
     if (autoplayCount !== null && autoplayCount > 0 && autoplayCount <= sortedLinks.length) {
       const activeLink = sortedLinks[autoplayCount - 1]
       if (activeLink) {
         const t = parseTimestamp(activeLink.timestamp)
         if (t !== null) {
-          setSliderTime(t)
+          setActiveHorizon(t)
         }
       }
     }
   }, [autoplayCount, sortedLinks])
 
-  // --- STRICT SYNCHRONIZED GRAPH FILTER ENGINE (ZERO ORPHANS GUARANTEE) ---
+  // --- STRICT SYNCHRONIZED GRAPH FILTER ENGINE (FULL 4-HOP TRAVERSAL & REAL-TIME TIME-SCRUBBING) ---
   const { filteredLinks, visibleNodes } = useMemo(() => {
-    const visibleNodeIds = new Set<string>()
-    if (rootId) visibleNodeIds.add(rootId)
-
-    // Always include Hop -1 (Source of Funds) nodes that feed into the target hub
-    normalizedNodes.forEach((n) => {
-      if (n.group === -1) {
-        visibleNodeIds.add(cleanId(n.id))
-      }
-    })
-
-    const finalLinksMap = new Map<string, GraphLink>()
-
-    // Always include Hop -1 inbound links
-    normalizedLinks.forEach((l) => {
-      if (l.hop === -1) {
-        const s = cleanId(l.source)
-        const t = cleanId(l.target)
-        if (s && t) {
-          finalLinksMap.set(`${s}->${t}`, l)
-        }
-      }
-    })
-
+    // Mode A: Autoplay step-by-step chronological animation
     if (autoplayCount !== null && autoplayCount > 0) {
-      // Mode A: Autoplay step-by-step chronological animation
       const activeLinks = sortedLinks.slice(0, autoplayCount)
+      const activeIdSet = new Set<string>()
+      if (rootId) activeIdSet.add(rootId)
       activeLinks.forEach((l) => {
-        const s = cleanId(l.source)
-        const t = cleanId(l.target)
-        visibleNodeIds.add(s)
-        visibleNodeIds.add(t)
-        finalLinksMap.set(`${s}->${t}`, l)
+        activeIdSet.add(cleanId(l.source))
+        activeIdSet.add(cleanId(l.target))
       })
-    } else {
-      // Mode B: Interactive Tree & Timeline Scrubber
-      // Step B1: Traverse expanded hierarchy outward from root
-      const hierQueue = Array.from(visibleNodeIds)
-      const hierVisited = new Set<string>()
-
-      while (hierQueue.length > 0) {
-        const currId = hierQueue.shift()!
-        if (hierVisited.has(currId)) continue
-        hierVisited.add(currId)
-
-        if (expandedNodeIds.has(currId)) {
-          const directChildren = childMap[currId]
-          if (directChildren) {
-            directChildren.forEach((childId) => {
-              visibleNodeIds.add(childId)
-              hierQueue.push(childId)
-            })
-          }
-        }
-      }
-
-      // Step B2: Collect candidate links between visible nodes where parent is expanded
-      const candidateLinks = normalizedLinks.filter((l) => {
-        if (l.hop === -1) return true
-        const s = cleanId(l.source)
-        const t = cleanId(l.target)
-        return visibleNodeIds.has(s) && visibleNodeIds.has(t) && expandedNodeIds.has(s)
-      })
-
-      // Step B3: Apply timeline filter to candidate links
-      if (!timeMetrics.hasTimes || sliderTime >= timeMetrics.max) {
-        candidateLinks.forEach((l) => {
-          finalLinksMap.set(`${cleanId(l.source)}->${cleanId(l.target)}`, l)
-        })
-      } else {
-        candidateLinks.forEach((l) => {
-          const t = parseTimestamp(l.timestamp)
-          if (l.hop === -1 || t === null || t <= sliderTime) {
-            finalLinksMap.set(`${cleanId(l.source)}->${cleanId(l.target)}`, l)
-          }
-        })
-      }
+      const finalNodes = normalizedNodes.filter((n) => activeIdSet.has(cleanId(n.id)))
+      return { filteredLinks: activeLinks, visibleNodes: finalNodes }
     }
 
-    // STRICT RULES 1 & 2 ENFORCEMENT:
-    // For every visible node (other than root and Hop -1 source nodes), its incoming parent edge MUST be forced visible,
-    // and its parent node MUST be added to visibleNodeIds, regardless of timestamp discrepancies!
-    const sourceNodeIdSet = new Set(
-      normalizedNodes.filter((n) => n.group === -1).map((n) => cleanId(n.id))
-    )
+    // Mode B: Interactive Tree & Real-Time Timeline Scrubber
+    // Calculate hidden descendants if any nodes are explicitly collapsed
+    const hiddenNodeIds = new Set<string>()
+    if (collapsedNodeIds.size > 0) {
+      collapsedNodeIds.forEach((collapsedId) => {
+        const descendants = getDownstreamDescendants(collapsedId)
+        descendants.forEach((d) => hiddenNodeIds.add(d))
+      })
+    }
 
-    let changed = true
-    while (changed) {
-      changed = false
-      const currentNodes = Array.from(visibleNodeIds)
+    // Filter links: exclude links involving collapsed/hidden nodes and filter by time scrubber
+    const finalLinksMap = new Map<string, GraphLink>()
+    normalizedLinks.forEach((l) => {
+      const s = cleanId(l.source)
+      const t = cleanId(l.target)
+      if (hiddenNodeIds.has(s) || hiddenNodeIds.has(t)) return
+      if (collapsedNodeIds.has(s)) return
 
-      for (const targetId of currentNodes) {
-        if (targetId === rootId || sourceNodeIdSet.has(targetId)) continue
-
-        let hasIncoming = false
-        for (const l of finalLinksMap.values()) {
-          if (cleanId(l.target) === targetId) {
-            hasIncoming = true
-            break
-          }
-        }
-
-        if (!hasIncoming) {
-          const incomingCandidates = incomingLinksByTarget[targetId] || []
-          if (incomingCandidates.length > 0) {
-            const chosenLink =
-              incomingCandidates.find((l) => expandedNodeIds.has(cleanId(l.source))) ||
-              incomingCandidates[0]
-
-            if (chosenLink) {
-              const s = cleanId(chosenLink.source)
-              const t = cleanId(chosenLink.target)
-              const key = `${s}->${t}`
-              if (!finalLinksMap.has(key)) {
-                finalLinksMap.set(key, chosenLink)
-                if (!visibleNodeIds.has(s)) {
-                  visibleNodeIds.add(s)
-                  changed = true
-                }
-              }
-            }
-          }
+      if (timeMetrics.hasTimes && activeHorizon < timeMetrics.max) {
+        const linkTime = parseTimestamp(l.timestamp)
+        if (linkTime !== null && linkTime > activeHorizon) {
+          return
         }
       }
-    }
+      finalLinksMap.set(`${s}->${t}-${l.timestamp || ''}`, l)
+    })
 
     const finalLinks = Array.from(finalLinksMap.values())
-    const finalNodes = normalizedNodes.filter((n) => visibleNodeIds.has(cleanId(n.id)))
+
+    // Active nodes connected to visible links, plus root & source of funds
+    const activeNodeIds = new Set<string>()
+    if (rootId) activeNodeIds.add(rootId)
+
+    finalLinks.forEach((l) => {
+      activeNodeIds.add(cleanId(l.source))
+      activeNodeIds.add(cleanId(l.target))
+    })
+
+    const isFullLedger = !timeMetrics.hasTimes || activeHorizon >= timeMetrics.max
+    const finalNodes = normalizedNodes.filter((n) => {
+      const id = cleanId(n.id)
+      if (hiddenNodeIds.has(id)) return false
+      if (isFullLedger) return true
+      return activeNodeIds.has(id) || n.group === 0 || n.group === -1
+    })
 
     return { filteredLinks: finalLinks, visibleNodes: finalNodes }
   }, [
     autoplayCount,
     sortedLinks,
     rootId,
-    expandedNodeIds,
-    childMap,
-    incomingLinksByTarget,
+    collapsedNodeIds,
     normalizedLinks,
     normalizedNodes,
     timeMetrics.hasTimes,
     timeMetrics.max,
-    sliderTime,
+    activeHorizon,
+    getDownstreamDescendants,
   ])
 
   // Cumulative visible transfer volume
@@ -1072,34 +1064,6 @@ function NetworkGraphInner({
       .reduce((a, c) => a + (Number(c.amount) || 0), 0)
     return Math.round((inSum - outSum) * 100) / 100
   }, [rootId, normalizedLinks])
-
-  // --- BFS TRAVERSAL ENGINE TO COLLECT ALL DOWNSTREAM DESCENDANTS ---
-  const getDownstreamDescendants = useCallback(
-    (startId: string): string[] => {
-      const cleanStart = cleanId(startId)
-      const descendants: string[] = []
-      const queue: string[] = [cleanStart]
-      const visited = new Set<string>([cleanStart])
-
-      while (queue.length > 0) {
-        const curr = queue.shift()!
-        const children = childMap[curr]
-        if (children) {
-          children.forEach((childId) => {
-            const cleanChild = cleanId(childId)
-            if (!visited.has(cleanChild)) {
-              visited.add(cleanChild)
-              descendants.push(cleanChild)
-              queue.push(cleanChild)
-            }
-          })
-        }
-      }
-
-      return descendants
-    },
-    [childMap]
-  )
 
   // --- PHASE 4: TRIGGER SECTION 91 NOTICE GENERATION & OPEN DRAWER ---
   const handleDraftNotice = useCallback(
@@ -1308,34 +1272,91 @@ function NetworkGraphInner({
     []
   )
 
-  // --- ROOT-TO-LEAF PATH TRACING & HOVER FOCUS ENGINE ---
-  const activeHighlight = useMemo(() => {
-    if (highlightedPathNodeId) {
-      const cleanSelected = cleanId(highlightedPathNodeId)
-      const pathNodeIds = new Set<string>([cleanSelected])
+  // Export Syndicate Data (CSV) for currently isolated subgraph
+  const handleExportSyndicateCSV = useCallback(() => {
+    if (!selectedNodeDetail) return
+    const syndicateSet = new Set([
+      selectedNodeDetail.id,
+      ...selectedNodeDetail.downstreamAccounts,
+    ])
+    const relevantLinks = normalizedLinks.filter(
+      (l) => syndicateSet.has(cleanId(l.source)) || syndicateSet.has(cleanId(l.target))
+    )
+    const headers = [
+      'Source_Account',
+      'Target_Account',
+      'Amount_INR',
+      'Hop_Level',
+      'Timestamp',
+      'IP_Address',
+      'Device_Type',
+      'Payment_Mode',
+      'Narration',
+    ]
+    const rows = relevantLinks.map((l) => [
+      cleanId(l.source),
+      cleanId(l.target),
+      l.amount,
+      l.hop,
+      `"${l.timestamp || ''}"`,
+      `"${l.ip_address || ''}"`,
+      `"${l.device_type || ''}"`,
+      `"${l.payment_mode || ''}"`,
+      `"${(l.transaction_narration || l.narration || '').replace(/"/g, '""')}"`,
+    ])
+    const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n')
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.setAttribute('href', url)
+    a.setAttribute('download', `Syndicate_Data_${selectedNodeDetail.id}.csv`)
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }, [selectedNodeDetail, normalizedLinks])
+
+  // --- RECURSIVE FUNCTION: TRACE BACKWARDS FROM TARGET NODE TO ROOT ANCHOR ---
+  const findPathToRoot = useCallback(
+    (targetNodeId: string) => {
+      const cleanTarget = cleanId(targetNodeId)
+      const pathNodeIds = new Set<string>([cleanTarget])
       const pathEdgeIds = new Set<string>()
 
-      // 1. Backward traversal to Root Hub & Hop -1 Feeders
-      const backwardQueue = [cleanSelected]
-      const backwardVisited = new Set<string>([cleanSelected])
+      // Backward traversal queue to Root Anchor and Hop -1 Feeders
+      const queue = [cleanTarget]
+      const visited = new Set<string>([cleanTarget])
 
-      while (backwardQueue.length > 0) {
-        const curr = backwardQueue.shift()!
+      while (queue.length > 0) {
+        const curr = queue.shift()!
         filteredLinks.forEach((link, idx) => {
           const s = cleanId(link.source)
           const t = cleanId(link.target)
           if (t === curr) {
             pathNodeIds.add(s)
             pathEdgeIds.add(`e-${s}->${t}-${idx}`)
-            if (!backwardVisited.has(s)) {
-              backwardVisited.add(s)
-              backwardQueue.push(s)
+            if (!visited.has(s)) {
+              visited.add(s)
+              queue.push(s)
             }
           }
         })
       }
 
-      // 2. Forward traversal to downstream leaves / terminal children
+      return { pathNodeIds, pathEdgeIds }
+    },
+    [filteredLinks]
+  )
+
+  // --- ROOT-TO-LEAF PATH TRACING & HOVER FOCUS ENGINE ---
+  const activeHighlight = useMemo(() => {
+    if (highlightedPathNodeId) {
+      const cleanSelected = cleanId(highlightedPathNodeId)
+      const rootTrace = findPathToRoot(cleanSelected)
+      const pathNodeIds = new Set<string>(rootTrace.pathNodeIds)
+      const pathEdgeIds = new Set<string>(rootTrace.pathEdgeIds)
+
+      // Forward traversal to downstream leaves / terminal children
       const forwardQueue = [cleanSelected]
       const forwardVisited = new Set<string>([cleanSelected])
 
@@ -1359,31 +1380,48 @@ function NetworkGraphInner({
     }
 
     if (hoveredNodeId) {
-      const nodeIds = new Set<string>([hoveredNodeId])
-      const edgeIds = new Set<string>()
-      filteredLinks.forEach((link, idx) => {
-        const s = cleanId(link.source)
-        const t = cleanId(link.target)
-        if (s === hoveredNodeId || t === hoveredNodeId) {
-          nodeIds.add(s)
-          nodeIds.add(t)
-          edgeIds.add(`e-${s}->${t}-${idx}`)
-        }
-      })
-      return { pathNodeIds: nodeIds, pathEdgeIds: edgeIds }
+      const cleanHovered = cleanId(hoveredNodeId)
+      return findPathToRoot(cleanHovered)
     }
 
     return null
-  }, [highlightedPathNodeId, hoveredNodeId, filteredLinks])
+  }, [highlightedPathNodeId, hoveredNodeId, findPathToRoot, filteredLinks])
 
   // --- CRITICAL ELK LAYOUT ENGINE (ANTI-COLLISION LAYERED EXPANSION & ZERO OVERLAPS) ---
   const CARD_WIDTH = 260
-  const CARD_HEIGHT = 112
+  const CARD_HEIGHT = 130
 
   const ANCHOR_X = 1100
   const ANCHOR_Y = 400
-  const computedRootCenterX = ANCHOR_X + CARD_WIDTH / 2
-  const computedRootCenterY = ANCHOR_Y + CARD_HEIGHT / 2
+
+  // Columnar default positions per hop level with vertical centering and zero collisions
+  const defaultPositions = useMemo(() => {
+    const posMap: Record<string, { x: number; y: number }> = {}
+    const groupCounts: Record<number, number> = {}
+    visibleNodes.forEach((n) => {
+      groupCounts[n.group] = (groupCounts[n.group] || 0) + 1
+    })
+
+    const groupCounters: Record<number, number> = {}
+    visibleNodes.forEach((n) => {
+      const g = n.group
+      const idx = groupCounters[g] || 0
+      groupCounters[g] = idx + 1
+      const totalInGroup = groupCounts[g] || 1
+
+      // Clean horizontal column spacing:
+      // Hop -1: x = ANCHOR_X - 420
+      // Hop 0:  x = ANCHOR_X
+      // Hop 1:  x = ANCHOR_X + 420
+      // Hop 2:  x = ANCHOR_X + 840
+      // Hop 3:  x = ANCHOR_X + 1260
+      // Hop 4:  x = ANCHOR_X + 1680
+      const x = ANCHOR_X + (g === -1 ? -420 : g * 420)
+      const y = ANCHOR_Y + (idx - (totalInGroup - 1) / 2) * 160
+      posMap[cleanId(n.id)] = { x, y }
+    })
+    return posMap
+  }, [visibleNodes])
 
   const [layoutPositions, setLayoutPositions] = useState<Record<string, { x: number; y: number }>>({})
   const prevLayoutKeyRef = useRef<string>('')
@@ -1486,38 +1524,41 @@ function NetworkGraphInner({
       const childCount = childMap[nId]?.size || 0
       const isExpanded = autoplayCount !== null ? true : expandedNodeIds.has(nId)
 
-      // Cash-Out / Final Destination Detection
+      // Cash-Out / Final Destination Detection — only nodes with NO outgoing transactions, group >= 2, never Root
       const incomingForNode = incomingLinksByTarget[nId] || []
       const outgoingForNode = normalizedLinks.filter((l) => cleanId(l.source) === nId)
       const hasIncoming = incomingForNode.length > 0 || filteredLinks.some((l) => cleanId(l.target) === nId)
-      const isTerminal = (childCount === 0 || n.group === 3) && n.group > 0 && nId !== rootId && hasIncoming
+      const isTerminal = childCount === 0 && outgoingForNode.length === 0 && n.group >= 2 && nId !== rootId && hasIncoming
 
       let isCashOut = false
       let cashOutType = ''
       let cashOutIcon: 'crypto' | 'atm' | 'forex' | 'cash' | 'terminal' = 'terminal'
 
       if (isTerminal) {
-        isCashOut = true
+        // STRICT RULE: Only label as specific cash-out type if narration/memo explicitly contains keywords
         const allNarrations = incomingForNode
           .map((l) => `${l.narration || ''} ${l.transaction_narration || ''} ${l.payment_mode || ''}`)
           .join(' ')
           .toLowerCase()
 
-        if (/crypto|binance|btc|eth|usdt|wazirx|coindcx|blockchain|token/i.test(allNarrations)) {
-          cashOutType = 'CRYPTO EXCHANGE'
-          cashOutIcon = 'crypto'
-        } else if (/atm|withdrawal|dispense|pos/i.test(allNarrations)) {
-          cashOutType = 'ATM WITHDRAWAL'
-          cashOutIcon = 'atm'
-        } else if (/forex|remit|swift|hawala|international|offshore|crossborder|foreign/i.test(allNarrations)) {
-          cashOutType = 'FOREX / OFFSHORE'
-          cashOutIcon = 'forex'
-        } else if (/cash|settlement|self|bearer/i.test(allNarrations)) {
-          cashOutType = 'CASH CASHOUT'
-          cashOutIcon = 'cash'
-        } else {
-          cashOutType = 'TERMINAL EXIT'
-          cashOutIcon = 'terminal'
+        if (allNarrations.trim().length > 0) {
+          if (/\b(crypto|binance|btc|eth|usdt|wazirx|coindcx|blockchain|token|p2p_crypto)\b/i.test(allNarrations)) {
+            isCashOut = true
+            cashOutType = 'CRYPTO EXCHANGE'
+            cashOutIcon = 'crypto'
+          } else if (/\b(atm|withdrawal|dispense|pos_cash)\b/i.test(allNarrations)) {
+            isCashOut = true
+            cashOutType = 'ATM WITHDRAWAL'
+            cashOutIcon = 'atm'
+          } else if (/\b(forex|remit|swift|hawala|international|crossborder|foreign)\b/i.test(allNarrations)) {
+            isCashOut = true
+            cashOutType = 'FOREX / OFFSHORE'
+            cashOutIcon = 'forex'
+          } else {
+            // Standard bank terminal node (not crypto)
+            isCashOut = false
+            cashOutType = ''
+          }
         }
       }
 
@@ -1532,7 +1573,7 @@ function NetworkGraphInner({
         outgoingForNode[0]?.narration ||
         ''
 
-      const pos = layoutPositions[nId] || {
+      const pos = layoutPositions[nId] || defaultPositions[nId] || {
         x: ANCHOR_X + (n.group === -1 ? -420 : n.group * 420),
         y: ANCHOR_Y + (idx % 10) * 140,
       }
@@ -1551,11 +1592,11 @@ function NetworkGraphInner({
         style: {
           width: CARD_WIDTH,
           height: CARD_HEIGHT,
-          opacity: isDimmed ? 0.15 : 1,
+          opacity: isDimmed ? 0.12 : 1,
           filter: isDimmed ? 'grayscale(100%)' : 'none',
           transition: 'opacity 0.2s ease, filter 0.2s ease',
           pointerEvents: 'auto',
-          zIndex: isFocused ? 25 : 1,
+          zIndex: isFocused ? 35 : 1,
         },
         data: {
           id: nId,
@@ -1571,6 +1612,7 @@ function NetworkGraphInner({
           inboundTotal,
           outboundTotal,
           retainedBalance,
+          isFocused,
           onNodeInteraction: handleNodeInteraction,
           onToggleExpand: handleToggleNodeExpand,
         },
@@ -1586,7 +1628,7 @@ function NetworkGraphInner({
         maximumFractionDigits: 2,
       })}`
 
-      // Distinct, elegant colors per hop tier
+      // Distinct, elegant colors per hop tier (Hop 4 = Purple)
       const strokeColor =
         link.hop === -1
           ? '#059669'
@@ -1594,7 +1636,9 @@ function NetworkGraphInner({
           ? '#4f46e5'
           : link.hop === 2
           ? '#d97706'
-          : '#e11d48'
+          : link.hop === 3
+          ? '#e11d48'
+          : '#9333ea'
 
       const isEdgeDimmed = activeHighlight !== null && !activeHighlight.pathEdgeIds.has(edgeId)
       const isEdgeFocused = activeHighlight !== null && activeHighlight.pathEdgeIds.has(edgeId)
@@ -1603,15 +1647,15 @@ function NetworkGraphInner({
         id: edgeId,
         source: s,
         target: t,
-        type: 'bezier',
+        type: 'smoothstep',
         animated: isEdgeFocused ? true : !isEdgeDimmed,
-        zIndex: isEdgeFocused ? 20 : 1,
+        zIndex: isEdgeFocused ? 25 : 1,
         style: {
           stroke: strokeColor,
           strokeWidth: isEdgeFocused
             ? 4.5
-            : Math.min(Math.max((Number(link.amount) || 1000) / 25000, 2), 4.5),
-          opacity: isEdgeDimmed ? 0.15 : 1,
+            : Math.min(Math.max((Number(link.amount) || 1000) / 25000, 2), 4),
+          opacity: isEdgeDimmed ? 0.08 : 1,
           filter: isEdgeDimmed ? 'grayscale(100%)' : 'none',
           transition: 'opacity 0.2s ease, stroke-width 0.2s ease, filter 0.2s ease',
         },
@@ -1797,7 +1841,27 @@ function NetworkGraphInner({
           {/* Center Root Camera Button */}
           <button
             type="button"
-            onClick={() => setCenter(computedRootCenterX, computedRootCenterY, { zoom: 1.2, duration: 700 })}
+            onClick={() => {
+              if (rootId) {
+                const targetNode = getNode(rootId)
+                if (targetNode) {
+                  const nodeW = targetNode.measured?.width ?? targetNode.width ?? CARD_WIDTH
+                  const nodeH = targetNode.measured?.height ?? targetNode.height ?? CARD_HEIGHT
+                  const cx = targetNode.position.x + nodeW / 2
+                  const cy = targetNode.position.y + nodeH / 2
+                  setCenter(cx, cy, { zoom: 1.2, duration: 700 })
+                } else {
+                  fitView({
+                    nodes: [{ id: rootId }],
+                    duration: 700,
+                    padding: 0.4,
+                    maxZoom: 1.4,
+                  })
+                }
+              } else {
+                fitView({ padding: 0.2, duration: 700, maxZoom: 1.2 })
+              }
+            }}
             className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-medium border border-slate-200 transition cursor-pointer shadow-2xs"
             title="Focus camera on Target Hub suspect node"
           >
@@ -1839,7 +1903,7 @@ function NetworkGraphInner({
       </div>
 
       {/* CANVAS CONTAINER: SOFT LIGHT GREY (bg-slate-50) WITH CLEAN DOTTED BACKGROUND */}
-      <div className="relative flex-1 w-full h-full min-h-[460px] overflow-hidden bg-slate-50">
+      <div className="relative flex-1 w-full h-full min-h-[600px] overflow-hidden bg-slate-50">
         {/* HUD TELEMETRY OVERLAY */}
         <div className="absolute top-3 left-3 z-20 pointer-events-none flex flex-col gap-1.5 font-mono text-[11px]">
           <div className="bg-white/95 backdrop-blur-md border border-slate-200 px-3 py-2 rounded-xl shadow-md flex items-center gap-3">
@@ -2419,6 +2483,17 @@ function NetworkGraphInner({
                   <span>Ask AI</span>
                 </button>
               </div>
+
+              {/* Export Syndicate Data (CSV) Button */}
+              <button
+                type="button"
+                onClick={handleExportSyndicateCSV}
+                className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-800 text-xs font-bold transition shadow-2xs cursor-pointer active:scale-95"
+                title="Export all transactions in this isolated syndicate trail to CSV"
+              >
+                <Download className="h-3.5 w-3.5 text-slate-700" />
+                <span>Export Syndicate Data (CSV)</span>
+              </button>
             </div>
           </div>
         )}
@@ -2653,7 +2728,7 @@ function NetworkGraphInner({
 
           {/* Scrubbed Date & Range info */}
           <div className="flex items-center gap-2">
-            <span className="text-[11px] text-slate-500 font-medium">Scrubber Position:</span>
+            <span className="text-[11px] text-slate-500 font-medium">15-Day Execution Window:</span>
             <span className="px-2 py-0.5 rounded bg-indigo-50 border border-indigo-200 text-indigo-700 font-bold font-mono text-xs">
               {formattedOverlayDate}
             </span>
@@ -2670,11 +2745,11 @@ function NetworkGraphInner({
             min={timeMetrics.min}
             max={timeMetrics.max}
             step={Math.max(1, Math.floor((timeMetrics.max - timeMetrics.min) / 100))}
-            value={sliderTime}
+            value={activeHorizon}
             onChange={(e) => {
               setIsPlaying(false)
               setAutoplayCount(null)
-              setSliderTime(Number(e.target.value))
+              setActiveHorizon(Number(e.target.value))
             }}
             className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600 hover:accent-indigo-700 focus:outline-none"
           />

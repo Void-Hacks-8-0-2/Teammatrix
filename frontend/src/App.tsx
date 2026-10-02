@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react'
 import Papa from 'papaparse'
 import { jsPDF } from 'jspdf'
+import ReactMarkdown from 'react-markdown'
 import NetworkGraph from './NetworkGraph'
 import {
   UploadCloud,
@@ -14,7 +15,6 @@ import {
   Trash2,
   Building,
   Network,
-  Lock,
   X,
   AlertTriangle,
   ChevronDown,
@@ -36,7 +36,174 @@ import {
   Gavel,
   Download,
   ShieldAlert,
+  BarChart3,
+  PieChart as PieChartIcon,
+  ArrowDownLeft,
+  ArrowUpRight,
+  Sparkles,
+  Layers,
 } from 'lucide-react'
+import {
+  PieChart,
+  Pie,
+  Cell,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip as RechartsTooltip,
+  ResponsiveContainer,
+} from 'recharts'
+
+// --- SLEEK ANALYTICS CHART COMPONENTS ---
+function InflowOutflowDonutChart({
+  totalInflow,
+  totalOutflow,
+}: {
+  totalInflow: number
+  totalOutflow: number
+}) {
+  const total = totalInflow + totalOutflow
+  const inflowPct = total > 0 ? Math.round((totalInflow / total) * 100) : 50
+  const outflowPct = total > 0 ? 100 - inflowPct : 50
+
+  const data = [
+    { name: 'Total Inflow', value: Math.max(totalInflow, 1), fill: '#10b981' },
+    { name: 'Total Outflow', value: Math.max(totalOutflow, 1), fill: '#ef4444' },
+  ]
+
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-3.5 shadow-2xs flex flex-col gap-2">
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
+          <PieChartIcon className="h-3.5 w-3.5 text-indigo-600" />
+          Flow Ratio (In vs Out)
+        </span>
+        <span className="text-[10px] font-mono font-bold text-slate-700 bg-slate-100 px-1.5 py-0.2 rounded border border-slate-200">
+          {inflowPct}% / {outflowPct}%
+        </span>
+      </div>
+      <div className="h-28 w-full flex items-center justify-center">
+        <ResponsiveContainer width="100%" height="100%">
+          <PieChart>
+            <Pie
+              data={data}
+              cx="50%"
+              cy="50%"
+              innerRadius={28}
+              outerRadius={44}
+              paddingAngle={3}
+              dataKey="value"
+            >
+              {data.map((entry, index) => (
+                <Cell key={`cell-${index}`} fill={entry.fill} stroke="#ffffff" strokeWidth={2} />
+              ))}
+            </Pie>
+            <RechartsTooltip
+              formatter={(value: any) => [`₹${Number(value).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`, '']}
+              contentStyle={{ backgroundColor: '#ffffff', borderColor: '#e2e8f0', borderRadius: '8px', fontSize: '11px', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)' }}
+            />
+          </PieChart>
+        </ResponsiveContainer>
+      </div>
+      <div className="grid grid-cols-2 gap-2 text-[10px] font-mono pt-1 border-t border-slate-100">
+        <div className="flex items-center gap-1.5">
+          <span className="h-2 w-2 rounded-full bg-emerald-500 shrink-0"></span>
+          <span className="text-slate-600 truncate">In: ₹{totalInflow.toLocaleString('en-IN', { maximumFractionDigits: 0 })}</span>
+        </div>
+        <div className="flex items-center gap-1.5 justify-end">
+          <span className="h-2 w-2 rounded-full bg-rose-500 shrink-0"></span>
+          <span className="text-slate-600 truncate">Out: ₹{totalOutflow.toLocaleString('en-IN', { maximumFractionDigits: 0 })}</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function TimelineVolumeBarChart({
+  links,
+}: {
+  links?: Array<{ amount: number; timestamp?: string }>
+}) {
+  const chartData = useMemo(() => {
+    if (!links || links.length === 0) {
+      return [
+        { label: '01:00', amount: 35000 },
+        { label: '02:00', amount: 82000 },
+        { label: '03:00', amount: 145000 },
+        { label: '04:00', amount: 95000 },
+        { label: '05:00', amount: 48000 },
+      ]
+    }
+
+    const bucketMap = new Map<string, number>()
+    links.forEach((l) => {
+      const ts = l.timestamp || ''
+      const match = ts.match(/(\d{1,2}:\d{2})/)
+      const key = match ? match[1] : ts.slice(11, 16) || 'Slot'
+      bucketMap.set(key, (bucketMap.get(key) || 0) + (Number(l.amount) || 0))
+    })
+
+    const items = Array.from(bucketMap.entries())
+      .map(([label, amount]) => ({ label, amount }))
+      .slice(0, 8)
+
+    return items.length > 0 ? items : [{ label: 'All', amount: 1000 }]
+  }, [links])
+
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-3.5 shadow-2xs flex flex-col gap-2">
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
+          <BarChart3 className="h-3.5 w-3.5 text-indigo-600" />
+          Timeline Dispersal
+        </span>
+        <span className="text-[10px] font-mono font-medium text-indigo-700 bg-indigo-50 px-1.5 py-0.2 rounded border border-indigo-200">
+          Hourly / Burst
+        </span>
+      </div>
+      <div className="h-28 w-full">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={chartData} margin={{ top: 5, right: 5, left: -25, bottom: 0 }}>
+            <XAxis dataKey="label" tick={{ fontSize: 9, fill: '#64748b' }} axisLine={false} tickLine={false} />
+            <YAxis tick={{ fontSize: 9, fill: '#94a3b8' }} axisLine={false} tickLine={false} tickFormatter={(v) => `₹${(v/1000).toFixed(0)}k`} />
+            <RechartsTooltip
+              formatter={(value: any) => [`₹${Number(value).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`, 'Volume']}
+              contentStyle={{ backgroundColor: '#ffffff', borderColor: '#e2e8f0', borderRadius: '8px', fontSize: '11px', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)' }}
+            />
+            <Bar dataKey="amount" fill="#6366f1" radius={[3, 3, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+      <div className="text-[9px] text-slate-400 font-mono flex items-center justify-between pt-1 border-t border-slate-100">
+        <span>Temporal Clustering</span>
+        <span>Peak Laundering Velocity</span>
+      </div>
+    </div>
+  )
+}
+
+// Map bank prefix to human-readable bank institution
+function getBankName(accountId: string): string {
+  const prefix = (String(accountId || '').trim()).slice(0, 4).toUpperCase()
+  const map: Record<string, string> = {
+    KKBK: 'Kotak Mahindra Bank',
+    SBIN: 'State Bank of India',
+    HDFC: 'HDFC Bank',
+    ICIC: 'ICICI Bank',
+    AXIS: 'Axis Bank',
+    PUNB: 'Punjab National Bank',
+    BARB: 'Bank of Baroda',
+    PYTM: 'Paytm Payments Bank',
+    AIRP: 'Airtel Payments Bank',
+    IPOS: 'India Post Payments Bank',
+    YESB: 'Yes Bank',
+    UTIB: 'Axis Bank Ltd',
+    CNRB: 'Canara Bank',
+    UBIN: 'Union Bank of India',
+  }
+  return map[prefix] || 'Commercial Bank'
+}
 
 // --- Interfaces & Types ---
 
@@ -152,13 +319,16 @@ export interface GraphLink {
   amount: number
   timestamp: string
   hop: number
+  hop_level?: number
   ip_address?: string
   device_type?: string
   payment_mode?: string
   narration?: string
+  transaction_narration?: string
 }
 
 export interface LayerSummary {
+  source_of_funds?: number
   victim: number
   layer_1: number
   layer_2: number
@@ -507,10 +677,12 @@ function computeLocalTrace(accountId: string, rows: TransactionRow[]): TraceResp
           amount: r.amount || 0,
           timestamp: r.timestamp || new Date().toISOString(),
           hop: curr.hop + 1,
+          hop_level: curr.hop + 1,
           ip_address: r.ip_address,
           device_type: r.device_type,
           payment_mode: r.payment_mode,
           narration: r.narration,
+          transaction_narration: r.narration,
         })
         const tgtLower = tgt.toLowerCase()
         if (!visited.has(tgtLower)) {
@@ -539,10 +711,12 @@ function computeLocalTrace(accountId: string, rows: TransactionRow[]): TraceResp
         amount: r.amount || 0,
         timestamp: r.timestamp || new Date().toISOString(),
         hop: 1,
+        hop_level: 1,
         ip_address: r.ip_address,
         device_type: r.device_type,
         payment_mode: r.payment_mode,
         narration: r.narration,
+        transaction_narration: r.narration,
       })
       nodeGroups[src] = 1
     }
@@ -627,6 +801,7 @@ export default function App() {
   const [traceError, setTraceError] = useState<string | null>(null)
   const [masterGraphData, setMasterGraphData] = useState<TraceResponse | null>(null)
   const [showTraceModal, setShowTraceModal] = useState<boolean>(false)
+  const [showEvidentiaryTable, setShowEvidentiaryTable] = useState<boolean>(false)
 
   // Split-Screen Right Panel Trace Data State (Phase 3)
   const [splitTraceData, setSplitTraceData] = useState<TraceResponse | null>(null)
@@ -635,6 +810,7 @@ export default function App() {
 
   // Accordion open/close state for layers in detailed trace report
   const [openLayers, setOpenLayers] = useState<{ [key: string]: boolean }>({
+    source_of_funds: true,
     victim: true,
     layer_1: true,
     layer_2: true,
@@ -661,10 +837,11 @@ export default function App() {
   // Interactive Pipeline Active Step (1: Ingestion, 2: Auto-Detect, 3: Graph, 4: AI Action)
   const currentPipelineStep = useMemo(() => {
     if (showUpload && (!transactions || localBuffer.length === 0)) return 1
+    if (showTraceModal || masterGraphData !== null) return 3
     if (isSec91DrawerOpen || isAIChatOpen) return 4
     if (selectedEntity !== null) return 3
     return 2
-  }, [showUpload, transactions, localBuffer.length, selectedEntity, isSec91DrawerOpen, isAIChatOpen])
+  }, [showUpload, transactions, localBuffer.length, showTraceModal, masterGraphData, selectedEntity, isSec91DrawerOpen, isAIChatOpen])
 
   // Step Click Handler: manually switch views without losing state
   const handleStepClick = (step: number) => {
@@ -673,17 +850,18 @@ export default function App() {
     } else if (step === 2) {
       setShowUpload(false)
       setSelectedEntity(null)
+      setShowTraceModal(false)
       setActiveTab('suspicious')
       setIsAIChatOpen(false)
       setIsSec91DrawerOpen(false)
     } else if (step === 3) {
       setShowUpload(false)
       setIsSec91DrawerOpen(false)
-      if (!selectedEntity) {
-        const top = suspiciousData?.data[0] || localMirageSuspicious?.data[0]
-        if (top) {
-          setSelectedEntity({ type: 'suspicious', data: top })
-        }
+      const targetAcc = activeTrackedId || suspiciousData?.data[0]?.account || localMirageSuspicious?.data[0]?.account
+      if (targetAcc) {
+        handleTrackAccount(targetAcc)
+      } else {
+        alert('Please upload a transaction dataset to trace account networks.')
       }
     } else if (step === 4) {
       setIsAIChatOpen(true)
@@ -695,28 +873,57 @@ export default function App() {
 
   // Initialize Proactive Chat Greeting
   const initProactiveChat = async () => {
+    const hasData = (transactions && transactions.total_rows > 0) || (suspiciousData && suspiciousData.data.length > 0) || (ingestMeta && ingestMeta.rows_ingested > 0)
+
+    if (!hasData) {
+      const idleMsg: AIChatMessage = {
+        id: `ai-idle-${Date.now()}`,
+        sender: 'ai',
+        text: 'System idle. Waiting for transaction journal CSV upload.',
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        suggestedActions: [],
+      }
+      setChatMessages([idleMsg])
+      return
+    }
+
     try {
       const res = await fetch('/api/top-suspect')
-      let topAcc = 'KKBK10000405'
-      let topScore = 99
-      let topIn = 690251.71
+      let topAcc: string | null = null
+      let topScore = 0
+      let topIn = 0
+
       if (res.ok) {
         const json = await res.json()
-        if (json.suspect) {
+        if (json.suspect && json.suspect.account) {
           topAcc = json.suspect.account
           topScore = json.suspect.risk_score
-          topIn = json.suspect.total_in || 245000.0
+          topIn = json.suspect.total_in || json.suspect.total_out || 0
         }
-      } else if (suspiciousData && suspiciousData.data.length > 0) {
+      }
+
+      if (!topAcc && suspiciousData && suspiciousData.data.length > 0) {
         topAcc = suspiciousData.data[0].account
         topScore = suspiciousData.data[0].risk_score
-        topIn = suspiciousData.data[0].total_received
+        topIn = suspiciousData.data[0].total_received || suspiciousData.data[0].total_sent || 0
+      }
+
+      if (!topAcc) {
+        const noSuspectMsg: AIChatMessage = {
+          id: `ai-info-${Date.now()}`,
+          sender: 'ai',
+          text: 'Dataset loaded and indexed. No critical mule hubs or high-risk laundering targets detected in the active ledger.',
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          suggestedActions: [],
+        }
+        setChatMessages([noSuspectMsg])
+        return
       }
 
       const greetingMsg: AIChatMessage = {
         id: `ai-proactive-${Date.now()}`,
         sender: 'ai',
-        text: `I have scanned the dataset. Account ${topAcc} shows a ${topScore}% risk of being a mule hub due to rapid off-hour transfers. Would you like me to generate a Sec 91 freeze notice?`,
+        text: `I have scanned the active ledger. Priority target **${topAcc}** shows a **${topScore}%** risk score with elevated structuring and rapid passthrough velocity. Would you like me to generate a Section 91 CrPC freeze notice or trace its 3-hop money dispersal trail?`,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         accountId: topAcc,
         suggestedActions: [
@@ -724,7 +931,7 @@ export default function App() {
             type: 'freeze_notice',
             label: `Draft Sec 91 Notice for ${topAcc}`,
             account_id: topAcc,
-            bank_name: topAcc.slice(0, 4) + ' Bank',
+            bank_name: topAcc.slice(0, 4).toUpperCase() + ' Bank',
             amount: topIn,
           },
           {
@@ -736,7 +943,15 @@ export default function App() {
       }
       setChatMessages([greetingMsg])
     } catch {
-      // fallback
+      setChatMessages([
+        {
+          id: `ai-ready-${Date.now()}`,
+          sender: 'ai',
+          text: 'AI Forensic Investigator ready. Enter an account query or request a global scan.',
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          suggestedActions: [],
+        }
+      ])
     }
   }
 
@@ -757,25 +972,42 @@ export default function App() {
     setIsAITyping(true)
 
     try {
-      const res = await fetch('/api/ai-chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: textToSend.trim() }),
-      })
-      if (res.ok) {
-        const data = await res.json()
-        const aiMsg: AIChatMessage = {
-          id: `ai-${Date.now()}`,
-          sender: 'ai',
-          text: data.response || 'Forensic analysis completed.',
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          accountId: data.account_id,
-          suggestedActions: data.suggested_actions,
+      let data: any = null
+      const lower = textToSend.toLowerCase()
+      if (lower.includes('full dataset') || lower.includes('global scan') || lower.includes('entire dataset')) {
+        const scanRes = await fetch('/api/ai/global-scan', { method: 'POST' })
+        if (scanRes.ok) {
+          const scanData = await scanRes.json()
+          data = {
+            response: scanData.report,
+            account_id: scanData.top_suspect,
+            suggested_actions: scanData.suggested_actions,
+          }
         }
-        setChatMessages((prev) => [...prev, aiMsg])
-      } else {
-        throw new Error(`API returned status ${res.status}`)
       }
+
+      if (!data) {
+        const res = await fetch('/api/ai-chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: textToSend.trim() }),
+        })
+        if (res.ok) {
+          data = await res.json()
+        } else {
+          throw new Error(`API returned status ${res.status}`)
+        }
+      }
+
+      const aiMsg: AIChatMessage = {
+        id: `ai-${Date.now()}`,
+        sender: 'ai',
+        text: data.response || 'Forensic analysis completed.',
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        accountId: data.account_id,
+        suggestedActions: data.suggested_actions,
+      }
+      setChatMessages((prev) => [...prev, aiMsg])
     } catch (err: unknown) {
       const aiErrMsg: AIChatMessage = {
         id: `ai-${Date.now()}`,
@@ -1043,6 +1275,8 @@ export default function App() {
     }
 
     setSelectedFile(file)
+    setChatMessages([])
+    setActiveTrackedId(null)
 
     // Trigger silent background upload & DuckDB ingestion immediately
     setBgIngestStatus('syncing')
@@ -1183,6 +1417,10 @@ export default function App() {
         setCurrentPage(1)
         setSuspiciousPage(1)
         setShowClearConfirm(false)
+        setChatMessages([])
+        setIsAIChatOpen(false)
+        setIsSec91DrawerOpen(false)
+        setActiveTrackedId(null)
       } else {
         alert('Failed to reset DuckDB database. Please check backend connection.')
       }
@@ -1221,70 +1459,66 @@ export default function App() {
     }
   }
 
-  // Automatically trigger 3-Hop Network Trace when a row is clicked (Split-Screen Right Panel - Phase 3)
+  // Strictly On-Demand 3-Hop Network Trace (Zero background prefetching)
+  const handleLoadSplitTrace = async (accountId?: string) => {
+    const acc =
+      accountId ||
+      (selectedEntity?.type === 'suspicious'
+        ? selectedEntity.data.account
+        : selectedEntity?.type === 'transaction'
+        ? selectedEntity.data.sender
+        : '')
+
+    const cleanId = (acc || '').trim()
+    if (!cleanId) return
+
+    setIsSplitTracing(true)
+    setSplitTraceError(null)
+
+    try {
+      const res = await fetch(`/api/trace/${encodeURIComponent(cleanId)}`)
+      if (res.ok) {
+        const data: TraceResponse = await res.json()
+        setSplitTraceData(data)
+      } else {
+        if (localBuffer.length > 0) {
+          const fallback = computeLocalTrace(cleanId, localBuffer)
+          setSplitTraceData(fallback)
+        } else {
+          const errJson = await res.json().catch(() => ({}))
+          throw new Error(errJson.detail || errJson.message || `Trace failed with status ${res.status}`)
+        }
+      }
+    } catch (err: unknown) {
+      if (localBuffer.length > 0) {
+        const fallback = computeLocalTrace(cleanId, localBuffer)
+        setSplitTraceData(fallback)
+      } else {
+        setSplitTraceError(err instanceof Error ? err.message : 'Failed to trace network.')
+      }
+    } finally {
+      setIsSplitTracing(false)
+    }
+  }
+
+  // Garbage Collection & Auto-Load: Auto-load graph when entity selected, clear heavy graph data when entity view closes
   useEffect(() => {
     if (!selectedEntity) {
       setSplitTraceData(null)
-      setIsSplitTracing(false)
       setSplitTraceError(null)
-      return
-    }
-
-    const accountId =
-      selectedEntity.type === 'suspicious'
-        ? selectedEntity.data.account
-        : selectedEntity.data.sender
-
-    const cleanId = (accountId || '').trim()
-    if (!cleanId) return
-
-    let isMounted = true
-    setIsSplitTracing(true)
-    setSplitTraceError(null)
-    setSplitTraceData(null)
-
-    const fetchSplitTrace = async () => {
-      try {
-        const res = await fetch(`/api/trace/${encodeURIComponent(cleanId)}`)
-        if (res.ok) {
-          const data: TraceResponse = await res.json()
-          if (isMounted) {
-            setSplitTraceData(data)
-          }
-        } else {
-          // If backend isn't ready or account has no outbound rows, fall back to local buffer
-          if (localBuffer.length > 0) {
-            const fallback = computeLocalTrace(cleanId, localBuffer)
-            if (isMounted) {
-              setSplitTraceData(fallback)
-            }
-          } else {
-            const errJson = await res.json().catch(() => ({}))
-            throw new Error(errJson.detail || errJson.message || `Trace failed with status ${res.status}`)
-          }
-        }
-      } catch (err: unknown) {
-        if (isMounted) {
-          if (localBuffer.length > 0) {
-            const fallback = computeLocalTrace(cleanId, localBuffer)
-            setSplitTraceData(fallback)
-          } else {
-            setSplitTraceError(err instanceof Error ? err.message : 'Failed to trace network.')
-          }
-        }
-      } finally {
-        if (isMounted) {
-          setIsSplitTracing(false)
-        }
+      setIsSplitTracing(false)
+    } else {
+      const accId =
+        selectedEntity.type === 'suspicious'
+          ? selectedEntity.data.account
+          : selectedEntity.type === 'transaction'
+          ? selectedEntity.data.sender
+          : ''
+      if (accId) {
+        handleLoadSplitTrace(accId)
       }
     }
-
-    fetchSplitTrace()
-
-    return () => {
-      isMounted = false
-    }
-  }, [selectedEntity, localBuffer])
+  }, [selectedEntity])
 
   const handlePageJumpSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -1323,6 +1557,13 @@ export default function App() {
     setOpenLayers((prev) => ({ ...prev, [layerKey]: !prev[layerKey] }))
   }
 
+  // Helper to safely extract hop depth whether returned as hop or hop_level
+  const getHop = (l: GraphLink): number => {
+    if (typeof l.hop_level === 'number') return l.hop_level
+    if (typeof l.hop === 'number') return l.hop
+    return 1
+  }
+
   // Filtered links inside the Detailed Report
   const filteredLinks =
     masterGraphData?.links.filter((l) => {
@@ -1332,21 +1573,26 @@ export default function App() {
         l.source.toLowerCase().includes(q) ||
         l.target.toLowerCase().includes(q) ||
         l.amount.toString().includes(q) ||
+        (l.narration && l.narration.toLowerCase().includes(q)) ||
+        (l.transaction_narration && l.transaction_narration.toLowerCase().includes(q)) ||
         (l.device_type && l.device_type.toLowerCase().includes(q)) ||
         (l.ip_address && l.ip_address.toLowerCase().includes(q)) ||
         (l.payment_mode && l.payment_mode.toLowerCase().includes(q))
       )
     }) || []
 
-  const layer1Links = filteredLinks.filter((l) => l.hop === 1)
-  const layer2Links = filteredLinks.filter((l) => l.hop === 2)
-  const layer3Links = filteredLinks.filter((l) => l.hop === 3)
+  const sourceOfFundsLinks = filteredLinks.filter((l) => getHop(l) === -1)
+  const layer1Links = filteredLinks.filter((l) => getHop(l) === 1)
+  const layer2Links = filteredLinks.filter((l) => getHop(l) === 2)
+  const layer3Links = filteredLinks.filter((l) => getHop(l) === 3)
 
+  const sourceOfFundsTotal = sourceOfFundsLinks.reduce((acc, curr) => acc + curr.amount, 0)
   const layer1Total = layer1Links.reduce((acc, curr) => acc + curr.amount, 0)
   const layer2Total = layer2Links.reduce((acc, curr) => acc + curr.amount, 0)
   const layer3Total = layer3Links.reduce((acc, curr) => acc + curr.amount, 0)
 
   const totalRows = transactions?.total_rows ?? ingestMeta?.rows_ingested ?? 0
+  const topSuspectAccount = suspiciousData?.data[0]?.account || localMirageSuspicious?.data[0]?.account || null
   const startRow = totalRows > 0 ? (currentPage - 1) * pageSize + 1 : 0
   const endRow = totalRows > 0 ? Math.min(currentPage * pageSize, totalRows) : 0
 
@@ -1448,6 +1694,92 @@ export default function App() {
         </div>
       </header>
 
+      {/* Sticky Compact Sub-Header Investigation Stepper */}
+      <nav className="sticky top-[61px] z-40 bg-white/95 backdrop-blur-md border-b border-slate-200 px-6 py-2 shadow-xs">
+        <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
+          <div className="flex items-center gap-2">
+            <span className="h-2 w-2 rounded-full bg-indigo-600 animate-pulse"></span>
+            <span className="text-xs font-bold text-slate-900 tracking-tight hidden sm:inline">Pipeline:</span>
+          </div>
+
+          {/* Compact 4-Step Navigation */}
+          <div className="flex items-center gap-2 overflow-x-auto py-0.5 flex-1 max-w-4xl">
+            {/* Step 1 */}
+            <button
+              type="button"
+              onClick={() => handleStepClick(1)}
+              className={`px-3 py-1.5 rounded-lg border text-xs font-medium transition cursor-pointer flex items-center gap-2 whitespace-nowrap ${
+                currentPipelineStep === 1
+                  ? 'border-indigo-500 bg-indigo-50 text-indigo-700 shadow-xs font-bold'
+                  : 'border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-600'
+              }`}
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+              <UploadCloud className="h-3.5 w-3.5" />
+              <span>01 Ingestion</span>
+              {totalRows > 0 && <span className="text-[10px] font-mono text-slate-400 font-normal">({totalRows.toLocaleString()})</span>}
+            </button>
+
+            {/* Step 2 */}
+            <button
+              type="button"
+              onClick={() => handleStepClick(2)}
+              className={`px-3 py-1.5 rounded-lg border text-xs font-medium transition cursor-pointer flex items-center gap-2 whitespace-nowrap ${
+                currentPipelineStep === 2
+                  ? 'border-indigo-500 bg-indigo-50 text-indigo-700 shadow-xs font-bold'
+                  : 'border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-600'
+              }`}
+            >
+              <span className={`h-1.5 w-1.5 rounded-full ${suspiciousTotalRows > 0 ? 'bg-amber-500' : 'bg-slate-300'}`}></span>
+              <AlertTriangle className="h-3.5 w-3.5" />
+              <span>02 Auto-Detect</span>
+              {suspiciousTotalRows > 0 && <span className="text-[10px] font-mono text-amber-600 font-normal">({suspiciousTotalRows.toLocaleString()})</span>}
+            </button>
+
+            {/* Step 3 */}
+            <button
+              type="button"
+              onClick={() => handleStepClick(3)}
+              className={`px-3 py-1.5 rounded-lg border text-xs font-medium transition cursor-pointer flex items-center gap-2 whitespace-nowrap ${
+                currentPipelineStep === 3
+                  ? 'border-indigo-500 bg-indigo-50 text-indigo-700 shadow-xs font-bold'
+                  : 'border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-600'
+              }`}
+            >
+              <span className={`h-1.5 w-1.5 rounded-full ${selectedEntity ? 'bg-indigo-600' : 'bg-slate-300'}`}></span>
+              <Network className="h-3.5 w-3.5" />
+              <span>03 OSINT Graph</span>
+              {selectedEntity && (
+                <span className="text-[10px] font-mono text-indigo-600 font-semibold truncate max-w-[100px]">
+                  {selectedEntity.type === 'suspicious' ? selectedEntity.data.account : selectedEntity.data.sender}
+                </span>
+              )}
+            </button>
+
+            {/* Step 4 */}
+            <button
+              type="button"
+              onClick={() => handleStepClick(4)}
+              className={`px-3 py-1.5 rounded-lg border text-xs font-medium transition cursor-pointer flex items-center gap-2 whitespace-nowrap ${
+                currentPipelineStep === 4
+                  ? 'border-purple-500 bg-purple-50 text-purple-700 shadow-xs font-bold'
+                  : 'border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-600'
+              }`}
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-purple-500 animate-pulse"></span>
+              <Bot className="h-3.5 w-3.5" />
+              <span>04 AI Action</span>
+            </button>
+          </div>
+
+          <div className="hidden lg:flex items-center gap-2 text-[11px] font-mono text-slate-500 shrink-0">
+            <span className="text-emerald-600 font-semibold">Zero-Wait</span>
+            <span>&bull;</span>
+            <span>State Preserved</span>
+          </div>
+        </div>
+      </nav>
+
       {/* Clear Space Confirmation Modal */}
       {showClearConfirm && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
@@ -1486,131 +1818,6 @@ export default function App() {
       {/* Content Area (Soft Light Grey) */}
       <div className="flex-1 bg-slate-50 text-slate-800">
         <main className="max-w-7xl w-full mx-auto px-6 py-6 flex flex-col gap-6">
-          {/* INTERACTIVE FORENSIC PIPELINE STEPPER (CRISP WHITE CARD) */}
-          <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
-            <div className="flex items-center justify-between text-xs font-medium text-slate-500 mb-3 flex-wrap gap-2">
-              <span className="text-slate-900 font-bold flex items-center gap-2">
-                <span className="h-2 w-2 rounded-full bg-indigo-600 animate-pulse"></span>
-                Investigation Pipeline
-              </span>
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] font-mono text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-200 font-semibold">
-                  Click any step to switch view
-                </span>
-                <span className="text-slate-400 text-xs hidden sm:inline">&bull; Zero State Loss</span>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
-              {/* Step 1: Ingestion & Indexing */}
-              <button
-                type="button"
-                onClick={() => handleStepClick(1)}
-                className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col gap-1.5 ${
-                  currentPipelineStep === 1
-                    ? 'border-indigo-500 bg-indigo-50/70 shadow-xs ring-1 ring-indigo-500/20'
-                    : 'border-slate-200 bg-slate-50/70 hover:bg-slate-100/70 hover:border-slate-300'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">
-                    Step 01
-                  </span>
-                  <span className="h-2 w-2 rounded-full bg-emerald-500"></span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <UploadCloud className={`h-4 w-4 ${currentPipelineStep === 1 ? 'text-indigo-600' : 'text-slate-500'}`} />
-                  <span className={`text-xs font-bold ${currentPipelineStep === 1 ? 'text-indigo-700' : 'text-slate-800'}`}>
-                    Ingestion & Indexing
-                  </span>
-                </div>
-                <span className="text-[11px] text-slate-500 line-clamp-1">
-                  {totalRows > 0 ? `${totalRows.toLocaleString()} Rows Synced` : 'CSV Journal Upload'}
-                </span>
-              </button>
-
-              {/* Step 2: Auto-Detect & Suspicious Hubs */}
-              <button
-                type="button"
-                onClick={() => handleStepClick(2)}
-                className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col gap-1.5 ${
-                  currentPipelineStep === 2
-                    ? 'border-indigo-500 bg-indigo-50/70 shadow-xs ring-1 ring-indigo-500/20'
-                    : 'border-slate-200 bg-slate-50/70 hover:bg-slate-100/70 hover:border-slate-300'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">
-                    Step 02
-                  </span>
-                  <span className={`h-2 w-2 rounded-full ${suspiciousTotalRows > 0 ? 'bg-amber-500' : 'bg-slate-300'}`}></span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <AlertTriangle className={`h-4 w-4 ${currentPipelineStep === 2 ? 'text-indigo-600' : 'text-slate-500'}`} />
-                  <span className={`text-xs font-bold ${currentPipelineStep === 2 ? 'text-indigo-700' : 'text-slate-800'}`}>
-                    Auto-Detect & Hubs
-                  </span>
-                </div>
-                <span className="text-[11px] text-slate-500 line-clamp-1">
-                  {suspiciousTotalRows > 0 ? `${suspiciousTotalRows.toLocaleString()} Flagged Accounts` : 'Mule & Velocity Heuristics'}
-                </span>
-              </button>
-
-              {/* Step 3: 3-Hop Graph & Time-Travel */}
-              <button
-                type="button"
-                onClick={() => handleStepClick(3)}
-                className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col gap-1.5 ${
-                  currentPipelineStep === 3
-                    ? 'border-indigo-500 bg-indigo-50/70 shadow-xs ring-1 ring-indigo-500/20'
-                    : 'border-slate-200 bg-slate-50/70 hover:bg-slate-100/70 hover:border-slate-300'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">
-                    Step 03
-                  </span>
-                  <span className={`h-2 w-2 rounded-full ${selectedEntity ? 'bg-indigo-600' : 'bg-slate-300'}`}></span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Network className={`h-4 w-4 ${currentPipelineStep === 3 ? 'text-indigo-600' : 'text-slate-500'}`} />
-                  <span className={`text-xs font-bold ${currentPipelineStep === 3 ? 'text-indigo-700' : 'text-slate-800'}`}>
-                    OSINT Graph & Trail
-                  </span>
-                </div>
-                <span className="text-[11px] text-slate-500 line-clamp-1">
-                  {selectedEntity ? (selectedEntity.type === 'suspicious' ? `Tracing ${selectedEntity.data.account}` : 'Active Transfer Trail') : 'Select suspect to render'}
-                </span>
-              </button>
-
-              {/* Step 4: AI Legal Action & Assistant */}
-              <button
-                type="button"
-                onClick={() => handleStepClick(4)}
-                className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col gap-1.5 ${
-                  currentPipelineStep === 4
-                    ? 'border-indigo-500 bg-indigo-50/70 shadow-xs ring-1 ring-indigo-500/20'
-                    : 'border-slate-200 bg-slate-50/70 hover:bg-slate-100/70 hover:border-slate-300'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">
-                    Step 04
-                  </span>
-                  <span className="h-2 w-2 rounded-full bg-purple-500 animate-pulse"></span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Bot className={`h-4 w-4 ${currentPipelineStep === 4 ? 'text-purple-600' : 'text-slate-500'}`} />
-                  <span className={`text-xs font-bold ${currentPipelineStep === 4 ? 'text-purple-700' : 'text-slate-800'}`}>
-                    AI Action & Freeze
-                  </span>
-                </div>
-                <span className="text-[11px] text-slate-500 line-clamp-1">
-                  Sec 91 Notices & Chat Assistant
-                </span>
-              </button>
-            </div>
-          </div>
 
           {/* SECTION 1: UPLOAD ZONE (CRISP WHITE CARD) */}
           {(showUpload || (!transactions && localBuffer.length === 0)) && (
@@ -1949,12 +2156,12 @@ export default function App() {
                             Money Laundering Flow (Structuring & Volume)
                           </span>
                           <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
-                            ${selectedEntity.data.total_volume.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            ₹{selectedEntity.data.total_volume.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                           </span>
                         </div>
                         <p className="text-[11px] text-slate-600 leading-relaxed mt-0.5">
                           {selectedEntity.data.threat_report?.money_laundering_flow.description ||
-                            `Cumulative volume throughput of $${selectedEntity.data.total_volume.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}. Transactions show patterns consistent with smurfing under mandatory reporting ceilings.`}
+                            `Cumulative volume throughput of ₹${selectedEntity.data.total_volume.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}. Transactions show patterns consistent with smurfing under mandatory reporting ceilings.`}
                         </p>
                       </div>
 
@@ -1999,6 +2206,17 @@ export default function App() {
                       </div>
                     </div>
 
+                    {/* Recharts Forensic Analytics Cards */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <InflowOutflowDonutChart
+                        totalInflow={selectedEntity.data.total_received}
+                        totalOutflow={selectedEntity.data.total_sent}
+                      />
+                      <TimelineVolumeBarChart
+                        links={splitTraceData?.links}
+                      />
+                    </div>
+
                     {/* Card 2: Forensic Telemetry & Attributes */}
                     <div className="p-5 rounded-xl bg-slate-50 border border-slate-200 shadow-2xs flex flex-col gap-3">
                       <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700">
@@ -2024,19 +2242,19 @@ export default function App() {
                         <div className="py-2 flex items-center justify-between">
                           <dt className="text-slate-500">Total Inflow Received:</dt>
                           <dd className="font-mono font-bold text-emerald-600">
-                            ${selectedEntity.data.total_received.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            ₹{selectedEntity.data.total_received.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                           </dd>
                         </div>
                         <div className="py-2 flex items-center justify-between">
                           <dt className="text-slate-500">Total Outflow Sent:</dt>
                           <dd className="font-mono font-bold text-rose-600">
-                            ${selectedEntity.data.total_sent.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            ₹{selectedEntity.data.total_sent.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                           </dd>
                         </div>
                         <div className="py-2 flex items-center justify-between">
                           <dt className="text-slate-500">Gross Layer Volume:</dt>
                           <dd className="font-mono font-bold text-slate-900">
-                            ${selectedEntity.data.total_volume.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            ₹{selectedEntity.data.total_volume.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                           </dd>
                         </div>
                         <div className="py-2 flex items-center justify-between">
@@ -2081,7 +2299,7 @@ export default function App() {
                       <div className="flex items-center justify-between pb-2 border-b border-slate-200">
                         <span className="text-xs text-slate-500">Transfer Amount:</span>
                         <span className="text-xl font-extrabold font-mono text-emerald-600">
-                          ${selectedEntity.data.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          ₹{selectedEntity.data.amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                         </span>
                       </div>
                       <div className="flex items-center justify-between text-xs">
@@ -2153,6 +2371,26 @@ export default function App() {
 
               {/* RIGHT PANEL: INTERACTIVE OSINT FLOW GRAPH (CRISP WHITE CONTAINER) */}
               <div className="lg:col-span-7 flex flex-col min-h-[640px] h-[calc(100vh-210px)] max-h-[840px] rounded-xl overflow-hidden shadow-sm border border-slate-200 bg-white">
+                {splitTraceData && (
+                  <div className="px-4 py-2 border-b border-slate-200 bg-slate-50/80 flex items-center justify-between z-10 shrink-0">
+                    <div className="flex items-center gap-2">
+                      <span className="h-2 w-2 rounded-full bg-emerald-500"></span>
+                      <span className="text-xs font-bold text-slate-800 font-mono">
+                        Active Graph: {splitTraceData.nodes?.length || 0} Nodes &bull; {splitTraceData.links?.length || 0} Edges
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setSplitTraceData(null)}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 text-xs font-bold transition cursor-pointer"
+                      title="Unload graph from memory and free browser RAM"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                      <span>Unload Graph</span>
+                    </button>
+                  </div>
+                )}
+
                 {isSplitTracing ? (
                   <div className="h-full w-full rounded-xl bg-slate-50 border border-slate-200 p-8 flex flex-col items-center justify-center text-center shadow-xs animate-in fade-in duration-150">
                     <div className="relative mb-4">
@@ -2174,16 +2412,32 @@ export default function App() {
                     </p>
                     <div className="mt-4 flex items-center gap-2 text-[11px] font-mono text-indigo-700 bg-indigo-50 px-3 py-1 rounded-full border border-indigo-200">
                       <RefreshCw className="h-3 w-3 animate-spin text-indigo-600" />
-                      <span>Resolving Victim &rarr; Layer 1 &rarr; Layer 2 &rarr; Layer 3</span>
+                      <span>Resolving Target Hub &rarr; Layer 1 &rarr; Layer 2 &rarr; Layer 3</span>
                     </div>
                   </div>
                 ) : splitTraceData && splitTraceData.nodes && splitTraceData.nodes.length > 0 ? (
-                  <NetworkGraph
-                    nodes={splitTraceData.nodes}
-                    links={splitTraceData.links}
-                    victimId={splitTraceData.victim_id}
-                    totalVolume={splitTraceData.total_volume}
-                  />
+                  <div className="flex-1 relative min-h-[460px] h-full overflow-hidden">
+                    <NetworkGraph
+                      nodes={splitTraceData.nodes}
+                      links={splitTraceData.links}
+                      victimId={splitTraceData.victim_id}
+                      totalVolume={splitTraceData.total_volume}
+                      onAskAI={(accId) => {
+                        setIsAIChatOpen(true)
+                        // Build a rich forensic context prompt so AI has real data to analyze
+                        const accLinks = splitTraceData.links || []
+                        const inflow = accLinks.filter(l => l.target === accId).reduce((s, l) => s + (Number(l.amount) || 0), 0)
+                        const outflow = accLinks.filter(l => l.source === accId).reduce((s, l) => s + (Number(l.amount) || 0), 0)
+                        const sampleNarration = accLinks.find(l => l.source === accId || l.target === accId)?.narration || ''
+                        const forensicPrompt = `Investigate suspect account ${accId}. ` +
+                          `Total inflow: ₹${inflow.toLocaleString('en-IN', { minimumFractionDigits: 2 })}, ` +
+                          `Total outflow: ₹${outflow.toLocaleString('en-IN', { minimumFractionDigits: 2 })}. ` +
+                          (sampleNarration ? `Transaction narration: "${sampleNarration}". ` : '') +
+                          `Explain WHY this pattern is suspicious and recommend the single most critical next investigative action.`
+                        handleSendChatMessage(forensicPrompt)
+                      }}
+                    />
+                  </div>
                 ) : splitTraceError ? (
                   <div className="h-full w-full rounded-xl bg-slate-50 border border-slate-200 p-8 flex flex-col items-center justify-center text-center">
                     <div className="h-14 w-14 rounded-2xl bg-rose-50 border border-rose-200 flex items-center justify-center text-rose-600 mb-3">
@@ -2209,8 +2463,13 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="h-full w-full rounded-xl bg-slate-50 border border-slate-200 p-8 flex flex-col items-center justify-center text-center">
-                    <Network className="h-8 w-8 text-slate-400 mb-2" />
-                    <p className="text-xs text-slate-500 font-mono">Select an entity to render its 3-hop network.</p>
+                    <RefreshCw className="h-8 w-8 animate-spin text-indigo-600 mb-3" />
+                    <h3 className="text-sm font-bold text-slate-900 font-mono tracking-tight">
+                      Mounting Multi-Hop Laundering Graph...
+                    </h3>
+                    <p className="text-xs text-slate-500 max-w-sm mt-1.5 leading-relaxed font-sans">
+                      Initializing React Flow canvas and auto-expanding Layer 1, 2, and 3 connections...
+                    </p>
                   </div>
                 )}
               </div>
@@ -2329,34 +2588,34 @@ export default function App() {
                   </form>
                 </div>
 
-                {/* 4 Multi-Factor Scoring Rubric Chips */}
+                {/* 4 Multi-Factor Scoring Rubric Chips (Strict Capped at 99%) */}
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 p-3.5 bg-slate-50 border-b border-slate-200 text-[11px]">
                   <div className="flex items-center gap-2 p-2 rounded-lg bg-white border border-slate-200 shadow-2xs">
-                    <Smartphone className="h-3.5 w-3.5 text-purple-600 shrink-0" />
+                    <Zap className="h-3.5 w-3.5 text-indigo-600 shrink-0" />
                     <div>
-                      <span className="font-bold text-purple-700">Device Anomaly (+35)</span>
-                      <p className="text-[10px] text-slate-500">Emulator, BlueStacks, VM, Linux</p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 p-2 rounded-lg bg-white border border-slate-200 shadow-2xs">
-                    <Globe className="h-3.5 w-3.5 text-rose-600 shrink-0" />
-                    <div>
-                      <span className="font-bold text-rose-700">IP Anomaly (+35)</span>
-                      <p className="text-[10px] text-slate-500">Foreign, Proxy, Tor, VPN Ranges</p>
+                      <span className="font-bold text-indigo-700">Velocity / Wash (+40)</span>
+                      <p className="text-[10px] text-slate-500">&gt;95% Outflow Dispersed &lt;24h</p>
                     </div>
                   </div>
                   <div className="flex items-center gap-2 p-2 rounded-lg bg-white border border-slate-200 shadow-2xs">
                     <AlertCircle className="h-3.5 w-3.5 text-amber-600 shrink-0" />
                     <div>
-                      <span className="font-bold text-amber-700">Structuring (+20)</span>
-                      <p className="text-[10px] text-slate-500">$49,900 - $49,999 Threshold Evasion</p>
+                      <span className="font-bold text-amber-700">Structuring (+30)</span>
+                      <p className="text-[10px] text-slate-500">₹49k-₹49.9k Evasion / Structured Velocity</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 p-2 rounded-lg bg-white border border-slate-200 shadow-2xs">
+                    <Globe className="h-3.5 w-3.5 text-rose-600 shrink-0" />
+                    <div>
+                      <span className="font-bold text-rose-700">Metadata Anomaly (+15)</span>
+                      <p className="text-[10px] text-slate-500">Emulator, VM, Proxy, Tor, VPN</p>
                     </div>
                   </div>
                   <div className="flex items-center gap-2 p-2 rounded-lg bg-white border border-slate-200 shadow-2xs">
                     <Clock className="h-3.5 w-3.5 text-sky-600 shrink-0" />
                     <div>
-                      <span className="font-bold text-sky-700">Temporal Anomaly (+10)</span>
-                      <p className="text-[10px] text-slate-500">Odd Hours (01:00 AM - 05:00 AM)</p>
+                      <span className="font-bold text-sky-700">Temporal Anomaly (+15)</span>
+                      <p className="text-[10px] text-slate-500">&gt;50% Txns at 01:00 - 05:00 AM</p>
                     </div>
                   </div>
                 </div>
@@ -2388,176 +2647,274 @@ export default function App() {
                       <p className="text-xs font-semibold">No suspicious accounts found matching criteria.</p>
                     </div>
                   ) : (
-                    <table className="w-full text-left text-xs">
-                      <thead className="sticky top-0 bg-slate-50 text-slate-600 font-semibold border-b border-slate-200 uppercase text-[10px] tracking-wider z-10 shadow-2xs">
-                        <tr>
-                          <th className="px-4 py-3 w-12 text-center text-slate-400">#</th>
-                          <th className="px-4 py-3">Investigated Account</th>
-                          <th className="px-4 py-3 w-44">Risk Score</th>
-                          <th className="px-4 py-3">Forensic Anomaly Badges</th>
-                          <th className="px-4 py-3 text-right">Inflow Volume</th>
-                          <th className="px-4 py-3 text-right">Outflow Volume</th>
-                          <th className="px-4 py-3 text-center">Txns</th>
-                          <th className="px-4 py-3 text-center">Action</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100 text-slate-700 font-mono">
-                        {suspiciousData.data.map((item, idx) => {
-                          const isCritical = item.risk_score >= 80
-                          const isHigh = item.risk_score >= 50 && item.risk_score < 80
-                          const rowNum = (suspiciousPage - 1) * suspiciousPageSize + idx + 1
-
-                          return (
-                            <tr
-                              key={idx}
-                              onClick={() => setSelectedEntity({ type: 'suspicious', data: item })}
-                              className="hover:bg-slate-50/70 cursor-pointer transition-colors"
-                              title="Click to view full entity details"
-                            >
-                              <td className="px-4 py-3 text-center text-slate-400 font-sans text-[11px]">
-                                {rowNum}
-                              </td>
-                              <td className="px-4 py-3">
-                                <div className="flex flex-col">
-                                  <span className="font-bold text-slate-900 font-mono text-xs">
-                                    {item.account}
+                    <>
+                      {/* TOP SUSPECT SPOTLIGHT: PRIORITY TARGET #1 CARD */}
+                      {suspiciousPage === 1 && suspiciousData.data.length > 0 && (
+                        <div className="m-3.5 p-4 rounded-xl bg-gradient-to-r from-rose-50 via-amber-50/60 to-white border-2 border-rose-300 shadow-sm relative overflow-hidden">
+                          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                            <div className="flex items-start gap-3.5">
+                              <div className="h-12 w-12 rounded-xl bg-rose-600 text-white flex items-center justify-center shrink-0 shadow-md shadow-rose-600/30">
+                                <AlertTriangle className="h-6 w-6 animate-pulse" />
+                              </div>
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-black bg-rose-600 text-white shadow-xs">
+                                    <span className="h-1.5 w-1.5 rounded-full bg-white animate-ping" />
+                                    PRIORITY TARGET #1
                                   </span>
-                                  {(item.primary_ip || item.primary_device) && (
-                                    <div className="flex items-center gap-1.5 text-[10px] text-slate-500 font-sans mt-0.5">
-                                      {item.primary_ip && (
-                                        <span className="flex items-center gap-0.5">
-                                          <Globe className="h-2.5 w-2.5 text-slate-400" />
-                                          {item.primary_ip}
-                                        </span>
-                                      )}
-                                      {item.primary_ip && item.primary_device && <span>&bull;</span>}
-                                      {item.primary_device && (
-                                        <span className="flex items-center gap-0.5">
-                                          <Smartphone className="h-2.5 w-2.5 text-slate-400" />
-                                          {item.primary_device}
-                                        </span>
-                                      )}
-                                    </div>
+                                  <span className="text-xs font-mono font-black text-rose-700 bg-rose-100 border border-rose-300 px-2 py-0.5 rounded-md">
+                                    RISK: {suspiciousData.data[0].risk_score}%
+                                  </span>
+                                  <span className="text-[11px] font-bold text-slate-500">
+                                    (Deterministic AML Score)
+                                  </span>
+                                </div>
+                                <h3 className="text-base font-mono font-black text-slate-900 mt-1 flex items-center gap-2">
+                                  <span>{suspiciousData.data[0].account}</span>
+                                  <span className="text-xs font-sans font-medium text-slate-500">
+                                    &bull; {getBankName(suspiciousData.data[0].account)}
+                                  </span>
+                                </h3>
+                                <div className="flex flex-wrap items-center gap-2.5 mt-1.5 text-xs text-slate-600 font-sans">
+                                  <span className="flex items-center gap-1 font-semibold text-emerald-700">
+                                    <ArrowDownLeft className="h-3.5 w-3.5 text-emerald-600" />
+                                    Inflow: ₹{suspiciousData.data[0].total_received.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+                                  </span>
+                                  <span>&bull;</span>
+                                  <span className="flex items-center gap-1 font-semibold text-rose-700">
+                                    <ArrowUpRight className="h-3.5 w-3.5 text-rose-600" />
+                                    Outflow: ₹{suspiciousData.data[0].total_sent.toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+                                  </span>
+                                  <span>&bull;</span>
+                                  <span className="font-semibold text-indigo-700">
+                                    Wash Ratio: {suspiciousData.data[0].wash_ratio}%
+                                  </span>
+                                  {suspiciousData.data[0].primary_ip && (
+                                    <>
+                                      <span>&bull;</span>
+                                      <span className="font-mono text-[11px] text-slate-500 bg-white px-1.5 py-0.5 rounded border border-slate-200">
+                                        {suspiciousData.data[0].primary_ip}
+                                      </span>
+                                    </>
                                   )}
                                 </div>
-                              </td>
-
-                              {/* Prominently Displayed Color-Coded Risk Score */}
-                              <td className="px-4 py-3">
-                                {isCritical ? (
-                                  <div className="flex flex-col gap-1 w-36">
-                                    <div className="flex items-center justify-between">
-                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-rose-50 text-rose-700 border border-rose-200 font-sans">
-                                        <AlertTriangle className="h-3 w-3 text-rose-600" />
-                                        CRITICAL {item.risk_score}/100
-                                      </span>
-                                    </div>
-                                    <div className="w-full bg-slate-200 rounded-full h-1.5 overflow-hidden">
-                                      <div
-                                        className="bg-rose-500 h-1.5 rounded-full"
-                                        style={{ width: `${item.risk_score}%` }}
-                                      />
-                                    </div>
-                                  </div>
-                                ) : isHigh ? (
-                                  <div className="flex flex-col gap-1 w-36">
-                                    <div className="flex items-center justify-between">
-                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-orange-50 text-orange-700 border border-orange-200 font-sans">
-                                        <Shield className="h-3 w-3 text-orange-600" />
-                                        HIGH RISK {item.risk_score}/100
-                                      </span>
-                                    </div>
-                                    <div className="w-full bg-slate-200 rounded-full h-1.5 overflow-hidden">
-                                      <div
-                                        className="bg-orange-500 h-1.5 rounded-full"
-                                        style={{ width: `${item.risk_score}%` }}
-                                      />
-                                    </div>
-                                  </div>
-                                ) : (
-                                  <div className="flex flex-col gap-1 w-36">
-                                    <div className="flex items-center justify-between">
-                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200 font-sans">
-                                        <Activity className="h-3 w-3 text-amber-600" />
-                                        ELEVATED {item.risk_score}/100
-                                      </span>
-                                    </div>
-                                    <div className="w-full bg-slate-200 rounded-full h-1.5 overflow-hidden">
-                                      <div
-                                        className="bg-amber-500 h-1.5 rounded-full"
-                                        style={{ width: `${item.risk_score}%` }}
-                                      />
-                                    </div>
-                                  </div>
-                                )}
-                              </td>
-
-                              {/* Multi-Factor Forensic Anomaly Tags */}
-                              <td className="px-4 py-3 font-sans">
-                                <div className="flex flex-wrap gap-1.5 max-w-md">
-                                  {item.risk_factors.map((factor, rIdx) => {
-                                    const isDevice =
-                                      factor.toLowerCase().includes('emulator') ||
-                                      factor.toLowerCase().includes('vm') ||
-                                      factor.toLowerCase().includes('linux') ||
-                                      factor.toLowerCase().includes('device')
-                                    const isIP =
-                                      factor.toLowerCase().includes('ip') ||
-                                      factor.toLowerCase().includes('proxy') ||
-                                      factor.toLowerCase().includes('vpn')
-                                    const isStructuring = factor.toLowerCase().includes('structuring')
-                                    const isTime =
-                                      factor.toLowerCase().includes('odd hour') ||
-                                      factor.toLowerCase().includes('am')
-
-                                    return (
-                                      <span
-                                        key={rIdx}
-                                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold border ${
-                                          isDevice
-                                            ? 'bg-purple-50 text-purple-700 border-purple-200'
-                                            : isIP
-                                            ? 'bg-rose-50 text-rose-700 border-rose-200'
-                                            : isStructuring
-                                            ? 'bg-amber-50 text-amber-700 border-amber-200'
-                                            : isTime
-                                            ? 'bg-sky-50 text-sky-700 border-sky-200'
-                                            : 'bg-slate-100 text-slate-700 border-slate-200'
-                                        }`}
-                                      >
-                                        {isDevice && <Smartphone className="h-2.5 w-2.5 text-purple-600 shrink-0" />}
-                                        {isIP && <Globe className="h-2.5 w-2.5 text-rose-600 shrink-0" />}
-                                        {isStructuring && <AlertTriangle className="h-2.5 w-2.5 text-amber-600 shrink-0" />}
-                                        {isTime && <Clock className="h-2.5 w-2.5 text-sky-600 shrink-0" />}
-                                        <span>{factor}</span>
-                                      </span>
-                                    )
-                                  })}
+                                {/* Forensic Anomaly Tags */}
+                                <div className="flex flex-wrap gap-1.5 mt-2">
+                                  {suspiciousData.data[0].risk_factors.map((f, i) => (
+                                    <span
+                                      key={i}
+                                      className="text-xs rounded-full px-2.5 py-1 bg-white border border-rose-200 text-rose-800 font-semibold shadow-2xs flex items-center gap-1"
+                                    >
+                                      <AlertTriangle className="h-3 w-3 text-rose-600 shrink-0" />
+                                      <span>{f}</span>
+                                    </span>
+                                  ))}
                                 </div>
-                              </td>
+                              </div>
+                            </div>
 
-                              <td className="px-4 py-3 text-right font-semibold text-emerald-600">
-                                ${item.total_received.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            <div className="flex items-center gap-2 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => handleTrackAccount(suspiciousData.data[0].account)}
+                                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-xs transition cursor-pointer"
+                              >
+                                <Network className="h-3.5 w-3.5" />
+                                <span>Track Money Trail</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setSelectedEntity({ type: 'suspicious', data: suspiciousData.data[0] })}
+                                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 font-bold text-xs shadow-2xs transition cursor-pointer"
+                              >
+                                <FileText className="h-3.5 w-3.5" />
+                                <span>View Dossier</span>
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      <table className="w-full text-left text-xs">
+                        <thead className="sticky top-0 bg-slate-50 text-slate-600 font-semibold border-b border-slate-200 uppercase text-[10px] tracking-wider z-10 shadow-2xs">
+                          <tr>
+                            <th className="px-3 py-1.5 w-10 text-center text-slate-400">#</th>
+                            <th className="px-3 py-1.5">Investigated Account</th>
+                            <th className="px-3 py-1.5 w-40">Risk Score</th>
+                            <th className="px-3 py-1.5">Forensic Anomaly Badges</th>
+                            <th className="px-3 py-1.5 text-right">Inflow Volume</th>
+                            <th className="px-3 py-1.5 text-right">Outflow Volume</th>
+                            <th className="px-3 py-1.5 text-center">Txns</th>
+                            <th className="px-3 py-1.5 text-center">Action</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 text-slate-700 font-mono">
+                          {suspiciousData.data.map((item, idx) => {
+                            const isCritical = item.risk_score >= 80
+                            const isHigh = item.risk_score >= 50 && item.risk_score < 80
+                            const rowNum = (suspiciousPage - 1) * suspiciousPageSize + idx + 1
+
+                            return (
+                              <tr
+                                key={idx}
+                                onClick={() => setSelectedEntity({ type: 'suspicious', data: item })}
+                                className="hover:bg-slate-50/70 cursor-pointer transition-colors"
+                                title="Click to view full entity details"
+                              >
+                                <td className="px-3 py-1 text-center text-slate-400 font-sans text-[11px]">
+                                  {rowNum}
+                                </td>
+                                <td className="px-3 py-1">
+                                  <div className="flex flex-col">
+                                    <span className="font-bold text-slate-900 font-mono text-xs">
+                                      {item.account}
+                                    </span>
+                                    {(item.primary_ip || item.primary_device) && (
+                                      <div className="flex items-center gap-1.5 text-[10px] text-slate-500 font-sans mt-0.5">
+                                        {item.primary_ip && (
+                                          <span className="flex items-center gap-0.5">
+                                            <Globe className="h-2.5 w-2.5 text-slate-400" />
+                                            {item.primary_ip}
+                                          </span>
+                                        )}
+                                        {item.primary_ip && item.primary_device && <span>&bull;</span>}
+                                        {item.primary_device && (
+                                          <span className="flex items-center gap-0.5">
+                                            <Smartphone className="h-2.5 w-2.5 text-slate-400" />
+                                            {item.primary_device}
+                                          </span>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                </td>
+
+                                {/* Prominently Displayed Bold Percentage Risk Score */}
+                                <td className="px-3 py-1">
+                                  {isCritical ? (
+                                    <div className="flex flex-col gap-0.5 w-32">
+                                      <div className="flex items-center justify-between">
+                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded-full text-[10px] font-extrabold bg-rose-50 text-rose-700 border border-rose-200 font-sans">
+                                          <AlertTriangle className="h-2.5 w-2.5 text-rose-600" />
+                                          CRITICAL <strong>{item.risk_score}%</strong>
+                                        </span>
+                                      </div>
+                                      <div className="w-full bg-slate-200 rounded-full h-1 overflow-hidden">
+                                        <div
+                                          className="bg-rose-500 h-1 rounded-full"
+                                          style={{ width: `${item.risk_score}%` }}
+                                        />
+                                      </div>
+                                    </div>
+                                  ) : isHigh ? (
+                                    <div className="flex flex-col gap-0.5 w-32">
+                                      <div className="flex items-center justify-between">
+                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded-full text-[10px] font-extrabold bg-orange-50 text-orange-700 border border-orange-200 font-sans">
+                                          <Shield className="h-2.5 w-2.5 text-orange-600" />
+                                          HIGH <strong>{item.risk_score}%</strong>
+                                        </span>
+                                      </div>
+                                      <div className="w-full bg-slate-200 rounded-full h-1 overflow-hidden">
+                                        <div
+                                          className="bg-orange-500 h-1 rounded-full"
+                                          style={{ width: `${item.risk_score}%` }}
+                                        />
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <div className="flex flex-col gap-0.5 w-32">
+                                      <div className="flex items-center justify-between">
+                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200 font-sans">
+                                          <Activity className="h-2.5 w-2.5 text-amber-600" />
+                                          ELEVATED <strong>{item.risk_score}%</strong>
+                                        </span>
+                                      </div>
+                                      <div className="w-full bg-slate-200 rounded-full h-1 overflow-hidden">
+                                        <div
+                                          className="bg-amber-500 h-1 rounded-full"
+                                          style={{ width: `${item.risk_score}%` }}
+                                        />
+                                      </div>
+                                    </div>
+                                  )}
+                                </td>
+
+                                {/* Multi-Factor Forensic Anomaly Tags */}
+                                <td className="px-3 py-1 font-sans">
+                                  <div className="flex flex-wrap gap-1 max-w-md">
+                                    {item.risk_factors.map((factor, rIdx) => {
+                                      const isVelocity =
+                                        factor.toLowerCase().includes('velocity') ||
+                                        factor.toLowerCase().includes('rapid') ||
+                                        factor.toLowerCase().includes('pass-through') ||
+                                        factor.toLowerCase().includes('panic')
+                                      const isDevice =
+                                        factor.toLowerCase().includes('emulator') ||
+                                        factor.toLowerCase().includes('vm') ||
+                                        factor.toLowerCase().includes('linux') ||
+                                        factor.toLowerCase().includes('device')
+                                      const isIP =
+                                        factor.toLowerCase().includes('ip') ||
+                                        factor.toLowerCase().includes('proxy') ||
+                                        factor.toLowerCase().includes('vpn')
+                                      const isStructuring = factor.toLowerCase().includes('structuring')
+                                      const isTime =
+                                        factor.toLowerCase().includes('odd hour') ||
+                                        factor.toLowerCase().includes('am') ||
+                                        factor.toLowerCase().includes('nocturnal') ||
+                                        factor.toLowerCase().includes('temporal')
+
+                                      return (
+                                        <span
+                                          key={rIdx}
+                                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold border ${
+                                            isVelocity
+                                              ? 'bg-indigo-50 text-indigo-700 border-indigo-200 shadow-2xs'
+                                              : isDevice
+                                              ? 'bg-purple-50 text-purple-700 border-purple-200 shadow-2xs'
+                                              : isIP
+                                              ? 'bg-rose-50 text-rose-700 border-rose-200 shadow-2xs'
+                                              : isStructuring
+                                              ? 'bg-amber-50 text-amber-700 border-amber-200 shadow-2xs'
+                                              : isTime
+                                              ? 'bg-sky-50 text-sky-700 border-sky-200 shadow-2xs'
+                                              : 'bg-slate-100 text-slate-700 border-slate-200'
+                                          }`}
+                                        >
+                                          {isVelocity && <Zap className="h-2.5 w-2.5 text-indigo-600 shrink-0" />}
+                                          {isDevice && <Smartphone className="h-2.5 w-2.5 text-purple-600 shrink-0" />}
+                                          {isIP && <Globe className="h-2.5 w-2.5 text-rose-600 shrink-0" />}
+                                          {isStructuring && <AlertTriangle className="h-2.5 w-2.5 text-amber-600 shrink-0" />}
+                                          {isTime && <Clock className="h-2.5 w-2.5 text-sky-600 shrink-0" />}
+                                          <span>{factor}</span>
+                                        </span>
+                                      )
+                                    })}
+                                  </div>
+                                </td>
+
+                              <td className="px-3 py-1 text-right font-semibold text-emerald-600">
+                                ₹{item.total_received.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                               </td>
-                              <td className="px-4 py-3 text-right font-semibold text-rose-600">
-                                ${item.total_sent.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              <td className="px-3 py-1 text-right font-semibold text-rose-600">
+                                ₹{item.total_sent.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                               </td>
-                              <td className="px-4 py-3 text-center text-slate-500 text-[11px]">
+                              <td className="px-3 py-1 text-center text-slate-500 text-[11px]">
                                 {item.transaction_count}
                               </td>
 
                               {/* Prominent Track Button */}
-                              <td className="px-4 py-3 text-center">
+                              <td className="px-3 py-1 text-center">
                                 <button
                                   type="button"
                                   onClick={(e) => {
                                     e.stopPropagation()
                                     handleTrackAccount(item.account)
                                   }}
-                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-sans text-xs font-bold shadow-xs transition active:scale-95 cursor-pointer"
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-sans text-xs font-bold shadow-xs transition active:scale-95 cursor-pointer"
                                   title={`Execute 3-Hop Recursive Trace starting from ${item.account}`}
                                 >
-                                  <Network className="h-3.5 w-3.5" />
+                                  <Network className="h-3 w-3" />
                                   <span>Track</span>
                                 </button>
                               </td>
@@ -2566,6 +2923,7 @@ export default function App() {
                         })}
                       </tbody>
                     </table>
+                  </>
                   )}
                 </div>
 
@@ -2664,16 +3022,16 @@ export default function App() {
                   <table className="w-full text-left text-xs">
                     <thead className="sticky top-0 bg-slate-50 text-slate-600 font-semibold border-b border-slate-200 uppercase text-[10px] tracking-wider z-10 shadow-2xs">
                       <tr>
-                        <th className="px-4 py-2.5 w-14 text-center text-slate-400">#</th>
-                        <th className="px-4 py-2.5">Sender Account</th>
-                        <th className="px-4 py-2.5">Receiver Account</th>
-                        <th className="px-4 py-2.5 text-right">Amount (USD)</th>
-                        <th className="px-4 py-2.5">Timestamp</th>
-                        <th className="px-4 py-2.5">IP Address</th>
-                        <th className="px-4 py-2.5">Device Type</th>
-                        <th className="px-4 py-2.5 text-center">Mode</th>
-                        <th className="px-4 py-2.5">Narration</th>
-                        <th className="px-4 py-2.5 text-center">Action</th>
+                        <th className="px-3 py-1.5 w-12 text-center text-slate-400">#</th>
+                        <th className="px-3 py-1.5">Sender Account</th>
+                        <th className="px-3 py-1.5">Receiver Account</th>
+                        <th className="px-3 py-1.5 text-right">Amount (INR)</th>
+                        <th className="px-3 py-1.5">Timestamp</th>
+                        <th className="px-3 py-1.5">IP Address</th>
+                        <th className="px-3 py-1.5">Device Type</th>
+                        <th className="px-3 py-1.5 text-center">Mode</th>
+                        <th className="px-3 py-1.5">Narration</th>
+                        <th className="px-3 py-1.5 text-center">Action</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 text-slate-700 font-mono">
@@ -2700,7 +3058,7 @@ export default function App() {
                                 : 'Click to view full transaction metadata'
                             }
                           >
-                            <td className="px-4 py-2.5 text-center text-slate-400 font-sans text-[11px]">
+                            <td className="px-3 py-1 text-center text-slate-400 font-sans text-[11px]">
                               <div className="flex items-center justify-center gap-1">
                                 {isRowSuspicious && (
                                   <span title="Flagged Suspicious Activity">
@@ -2710,43 +3068,43 @@ export default function App() {
                                 <span>{rowNumber.toLocaleString()}</span>
                               </div>
                             </td>
-                            <td className="px-4 py-2.5 font-bold text-slate-900">
+                            <td className="px-3 py-1 font-bold text-slate-900">
                               <span
-                                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded font-medium border ${
+                                className={`inline-flex items-center gap-1 px-1.5 py-0.2 rounded font-medium border ${
                                   isSenderSuspicious
                                     ? 'bg-amber-50 text-amber-700 border-amber-200 font-bold'
                                     : 'bg-slate-100 text-slate-700 border-slate-200'
                                 }`}
                               >
                                 {isSenderSuspicious && (
-                                  <AlertTriangle className="h-3 w-3 text-amber-600 shrink-0" />
+                                  <AlertTriangle className="h-2.5 w-2.5 text-amber-600 shrink-0" />
                                 )}
                                 {row.sender || <span className="text-slate-400 italic">N/A</span>}
                               </span>
                             </td>
-                            <td className="px-4 py-2.5 font-bold text-slate-900">
+                            <td className="px-3 py-1 font-bold text-slate-900">
                               <span
-                                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded font-medium border ${
+                                className={`inline-flex items-center gap-1 px-1.5 py-0.2 rounded font-medium border ${
                                   isReceiverSuspicious
                                     ? 'bg-amber-50 text-amber-700 border-amber-200 font-bold'
                                     : 'bg-slate-100 text-slate-700 border-slate-200'
                                 }`}
                               >
                                 {isReceiverSuspicious && (
-                                  <AlertTriangle className="h-3 w-3 text-amber-600 shrink-0" />
+                                  <AlertTriangle className="h-2.5 w-2.5 text-amber-600 shrink-0" />
                                 )}
                                 {row.receiver || <span className="text-slate-400 italic">N/A</span>}
                               </span>
                             </td>
-                            <td className="px-4 py-2.5 text-right font-semibold text-emerald-600">
-                              ${row.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            <td className="px-3 py-1 text-right font-semibold text-emerald-600">
+                              ₹{row.amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                             </td>
-                            <td className="px-4 py-2.5 text-slate-500 text-[11px]">
+                            <td className="px-3 py-1 text-slate-500 text-[11px]">
                               {row.timestamp}
                             </td>
-                            <td className="px-4 py-2.5 text-slate-600 text-[11px]">
+                            <td className="px-3 py-1 text-slate-600 text-[11px]">
                               {row.ip_address ? (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-700">
+                                <span className="inline-flex items-center gap-1 px-1 py-0.2 rounded bg-slate-100 border border-slate-200 text-slate-700">
                                   <Globe className="h-2.5 w-2.5 text-slate-400" />
                                   {row.ip_address}
                                 </span>
@@ -2754,9 +3112,9 @@ export default function App() {
                                 <span className="text-slate-400 italic">-</span>
                               )}
                             </td>
-                            <td className="px-4 py-2.5 text-slate-600 text-[11px]">
+                            <td className="px-3 py-1 text-slate-600 text-[11px]">
                               {row.device_type ? (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-700">
+                                <span className="inline-flex items-center gap-1 px-1 py-0.2 rounded bg-slate-100 border border-slate-200 text-slate-700">
                                   <Smartphone className="h-2.5 w-2.5 text-slate-400" />
                                   {row.device_type}
                                 </span>
@@ -2764,22 +3122,22 @@ export default function App() {
                                 <span className="text-slate-400 italic">-</span>
                               )}
                             </td>
-                            <td className="px-4 py-2.5 text-center">
-                              <span className="px-1.5 py-0.5 rounded bg-indigo-50 border border-indigo-200 text-indigo-700 text-[10px] font-bold">
+                            <td className="px-3 py-1 text-center">
+                              <span className="px-1.5 py-0.2 rounded bg-indigo-50 border border-indigo-200 text-indigo-700 text-[10px] font-bold">
                                 {row.payment_mode || 'STANDARD'}
                               </span>
                             </td>
-                            <td className="px-4 py-2.5 text-slate-500 font-sans text-[11px] truncate max-w-xs" title={row.narration}>
+                            <td className="px-3 py-1 text-slate-500 font-sans text-[11px] truncate max-w-xs" title={row.narration}>
                               {row.narration || <span className="text-slate-400 italic">-</span>}
                             </td>
-                            <td className="px-4 py-2.5 text-center">
+                            <td className="px-3 py-1 text-center">
                               <button
                                 type="button"
                                 onClick={(e) => {
                                   e.stopPropagation()
                                   handleTrackAccount(row.sender)
                                 }}
-                                className="px-2.5 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-[11px] font-sans font-semibold transition cursor-pointer"
+                                className="px-2 py-0.5 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-[11px] font-sans font-semibold transition cursor-pointer"
                               >
                                 Track
                               </button>
@@ -2848,52 +3206,109 @@ export default function App() {
       </main>
     </div>
 
-      {/* SECTION 4: COMPREHENSIVE DETAILED LAYER-BY-LAYER TRACE MODAL */}
+      {/* SECTION 4: DIRECT HIGH-PERFORMANCE OSINT NETWORK GRAPH VIEW */}
       {showTraceModal && (
-        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl p-6 md:p-8 flex flex-col gap-6 max-w-6xl w-full max-h-[90vh] overflow-y-auto animate-in fade-in zoom-in duration-150 text-slate-800">
-            {/* Report Header */}
-            <div className="flex items-start justify-between flex-wrap gap-4 pb-5 border-b border-slate-200">
-              <div className="flex items-start gap-3.5">
-                <div className="h-11 w-11 rounded-xl bg-indigo-50 border border-indigo-200 flex items-center justify-center text-indigo-600 shrink-0">
-                  <Network className="h-6 w-6" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-[11px] font-bold uppercase tracking-wider text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-200 font-mono">
-                      Detailed Trace Report
-                    </span>
-                    <span className="text-xs font-mono font-bold text-slate-700 bg-slate-100 px-2.5 py-0.5 rounded border border-slate-200">
-                      Target: {activeTrackedId}
-                    </span>
-                  </div>
-                  <h2 className="text-lg font-extrabold text-slate-900 mt-1">
-                    Multi-Hop Money Laundering Trail Forensics
-                  </h2>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    Categorized breakdown of all downstream connections discovered by Recursive DuckDB CTE.
-                  </p>
-                </div>
+        <div className="fixed inset-0 z-50 bg-slate-900/95 backdrop-blur-sm flex flex-col overflow-hidden">
+          {/* STICKY TOP CONTROLS & TELEMETRY HEADER BAR */}
+          <header className="shrink-0 z-50 bg-slate-900 text-white px-5 py-2.5 border-b border-slate-800 shadow-xl flex items-center justify-between gap-4 flex-wrap">
+            <div className="flex items-center gap-3">
+              <div className="h-9 w-9 rounded-xl bg-indigo-600 border border-indigo-500 flex items-center justify-center text-white shrink-0 shadow-sm">
+                <Network className="h-5 w-5" />
               </div>
-
-              {/* Action Buttons */}
-              <div className="flex items-center gap-2.5">
-                <button
-                  disabled
-                  className="px-4 py-2 rounded-lg bg-slate-100 text-slate-400 text-xs font-bold cursor-not-allowed border border-slate-200 flex items-center gap-2 shadow-xs"
-                >
-                  <Lock className="h-3.5 w-3.5 text-slate-400" />
-                  <span>Proceed to Visual Graph (Phase 3)</span>
-                </button>
-                <button
-                  onClick={() => setShowTraceModal(false)}
-                  className="p-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 hover:text-slate-900 transition cursor-pointer"
-                  title="Close Trace Report"
-                >
-                  <X className="h-4 w-4" />
-                </button>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-300 bg-indigo-950/90 px-2 py-0.5 rounded border border-indigo-800 font-mono">
+                    3-Hop Forensic Trail
+                  </span>
+                  <span className="text-xs font-mono font-black text-rose-300 bg-rose-950/90 px-2.5 py-0.5 rounded border border-rose-800">
+                    Target Hub: {activeTrackedId}
+                  </span>
+                </div>
+                <h2 className="text-xs font-bold text-slate-200 mt-0.5 flex items-center gap-2">
+                  <span>Recursive Money Dispersal Map</span>
+                  <span className="text-[11px] text-slate-400 font-normal hidden sm:inline">&bull; Zero-Cycle Loop Safety</span>
+                </h2>
               </div>
             </div>
+
+            {/* Metrics Pills (Entities, Links, Volume, Retained Balance) */}
+            {masterGraphData && !isTracing && (
+              <div className="flex items-center gap-2 flex-wrap">
+                <div className="px-2.5 py-1 rounded-lg bg-slate-800/90 border border-slate-700 text-xs font-mono">
+                  <span className="text-slate-400 text-[10px] uppercase mr-1.5">Nodes:</span>
+                  <span className="font-bold text-white">{masterGraphData.total_nodes}</span>
+                </div>
+                <div className="px-2.5 py-1 rounded-lg bg-slate-800/90 border border-slate-700 text-xs font-mono">
+                  <span className="text-slate-400 text-[10px] uppercase mr-1.5">Links:</span>
+                  <span className="font-bold text-indigo-300">{masterGraphData.total_links}</span>
+                </div>
+                <div className="px-2.5 py-1 rounded-lg bg-slate-800/90 border border-slate-700 text-xs font-mono">
+                  <span className="text-slate-400 text-[10px] uppercase mr-1.5">Volume:</span>
+                  <span className="font-bold text-emerald-400">
+                    ₹{masterGraphData.total_volume.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                </div>
+                {/* Estimated Retained Balance Metric Pill */}
+                {(() => {
+                  const inHopM1 = masterGraphData.links
+                    .filter((l) => getHop(l) === -1)
+                    .reduce((acc, curr) => acc + (Number(curr.amount) || 0), 0)
+                  const outHop1 = masterGraphData.links
+                    .filter((l) => getHop(l) === 1)
+                    .reduce((acc, curr) => acc + (Number(curr.amount) || 0), 0)
+                  const retained = inHopM1 - outHop1
+                  const isPos = retained >= 0
+                  return (
+                    <div className="px-2.5 py-1 rounded-lg bg-slate-800/90 border border-slate-700 text-xs font-mono flex items-center gap-1.5">
+                      <span className="text-slate-400 text-[10px] uppercase">Retained Bal:</span>
+                      <span className={`font-black px-1.5 py-0.2 rounded text-[11px] border ${
+                        isPos
+                          ? 'bg-emerald-950/90 text-emerald-300 border-emerald-700'
+                          : 'bg-rose-950/90 text-rose-300 border-rose-700'
+                      }`}>
+                        {isPos ? '+' : '-'}₹{Math.abs(retained).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                    </div>
+                  )
+                })()}
+              </div>
+            )}
+
+            {/* Action Buttons: Toggle Evidentiary Table + STICKY CLOSE [X] */}
+            <div className="flex items-center gap-2">
+              {masterGraphData && !isTracing && (
+                <button
+                  type="button"
+                  onClick={() => setShowEvidentiaryTable((prev) => !prev)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer border ${
+                    showEvidentiaryTable
+                      ? 'bg-indigo-600 border-indigo-500 text-white shadow-xs'
+                      : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-300'
+                  }`}
+                  title="Toggle evidentiary link tables"
+                >
+                  <Layers className="h-3.5 w-3.5" />
+                  <span>{showEvidentiaryTable ? 'Switch to Visual Graph' : 'View Tabular Breakdown'}</span>
+                </button>
+              )}
+
+              {/* STICKY CLOSE [X] BUTTON (Strict RAM Garbage Collection) */}
+              <button
+                type="button"
+                onClick={() => {
+                  setShowTraceModal(false)
+                  setMasterGraphData(null)
+                  setActiveTrackedId(null)
+                  setTraceError(null)
+                }}
+                className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs flex items-center gap-1.5 transition shadow-sm active:scale-95 cursor-pointer"
+                title="Close Graph & Free Memory"
+              >
+                <X className="h-4 w-4" />
+                <span className="hidden sm:inline">Close Graph</span>
+              </button>
+            </div>
+          </header>
 
             {/* Error or Loading State */}
             {isTracing && (
@@ -2911,108 +3326,187 @@ export default function App() {
               </div>
             )}
 
-            {/* Complete Report Details */}
-            {masterGraphData && !isTracing && (
-              <div className="flex flex-col gap-6">
-                {/* 4 Executive Metric Cards */}
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                  <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
-                    <span className="text-[11px] font-medium text-slate-500 uppercase tracking-wider block">
-                      Total Discovered Entities
-                    </span>
-                    <p className="text-2xl font-extrabold text-slate-900 font-mono mt-1">
-                      {masterGraphData.total_nodes} Accounts
-                    </p>
-                    <span className="text-[10px] text-indigo-600 font-medium">In Master State</span>
-                  </div>
+            {/* Mode 1: Full-Canvas Visual Network Graph (Zero Scroll Trap) */}
+            {masterGraphData && !isTracing && !showEvidentiaryTable && (
+              <div className="flex-1 w-full relative bg-slate-50 overflow-hidden">
+                <NetworkGraph
+                  nodes={masterGraphData.nodes}
+                  links={masterGraphData.links}
+                  victimId={masterGraphData.victim_id}
+                  totalVolume={masterGraphData.total_volume}
+                  onAskAI={(accId) => {
+                    setIsAIChatOpen(true)
+                    handleSendChatMessage(`Analyze suspect account ${accId}`)
+                  }}
+                />
+              </div>
+            )}
 
-                  <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
-                    <span className="text-[11px] font-medium text-slate-500 uppercase tracking-wider block">
-                      Total Links Traversed
-                    </span>
-                    <p className="text-2xl font-extrabold text-indigo-600 font-mono mt-1">
-                      {masterGraphData.total_links} Transfers
-                    </p>
-                    <span className="text-[10px] text-slate-500 font-medium">100% Displayed Below</span>
-                  </div>
+            {/* Mode 2: Evidentiary Breakdown and Charts */}
+            {masterGraphData && !isTracing && showEvidentiaryTable && (
+              <div className="flex-1 w-full overflow-y-auto bg-slate-100/70">
+                <div className="p-6 max-w-7xl mx-auto w-full flex flex-col gap-6 text-slate-800 animate-in fade-in duration-150">
+                    {/* 4 Executive Metric Cards */}
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                      <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-2xs">
+                        <span className="text-[11px] font-medium text-slate-500 uppercase tracking-wider block">
+                          Total Discovered Entities
+                        </span>
+                        <p className="text-2xl font-extrabold text-slate-900 font-mono mt-1">
+                          {masterGraphData.total_nodes} Accounts
+                        </p>
+                        <span className="text-[10px] text-indigo-600 font-medium">In Master State</span>
+                      </div>
 
-                  <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
-                    <span className="text-[11px] font-medium text-slate-500 uppercase tracking-wider block">
-                      Total Layered Volume
-                    </span>
-                    <p className="text-2xl font-extrabold text-emerald-600 font-mono mt-1">
-                      ${masterGraphData.total_volume.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                    </p>
-                    <span className="text-[10px] text-slate-500 font-medium">Cumulative Money Trail</span>
-                  </div>
+                      <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-2xs">
+                        <span className="text-[11px] font-medium text-slate-500 uppercase tracking-wider block">
+                          Total Links Traversed
+                        </span>
+                        <p className="text-2xl font-extrabold text-indigo-600 font-mono mt-1">
+                          {masterGraphData.total_links} Transfers
+                        </p>
+                        <span className="text-[10px] text-slate-500 font-medium">100% Displayed Below</span>
+                      </div>
 
-                  <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
-                    <span className="text-[11px] font-medium text-slate-500 uppercase tracking-wider block">
-                      Max Hop Depth
-                    </span>
-                    <p className="text-2xl font-extrabold text-slate-900 font-mono mt-1">
-                      3 Layers
-                    </p>
-                    <span className="text-[10px] text-emerald-600 font-medium">Zero-Cycle Loop Safety</span>
-                  </div>
-                </div>
+                      <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-2xs">
+                        <span className="text-[11px] font-medium text-slate-500 uppercase tracking-wider block">
+                          Total Layered Volume
+                        </span>
+                        <p className="text-2xl font-extrabold text-emerald-600 font-mono mt-1">
+                          ₹{masterGraphData.total_volume.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </p>
+                        <span className="text-[10px] text-slate-500 font-medium">Cumulative Money Trail</span>
+                      </div>
 
-                {/* Filter within Detailed Report */}
-                <div className="flex items-center justify-between gap-3 bg-slate-50 p-3 rounded-xl border border-slate-200">
-                  <div className="flex items-center gap-2">
-                    <Search className="h-4 w-4 text-slate-400" />
-                    <input
-                      type="text"
-                      placeholder="Search within report links (account, amount)..."
-                      value={traceFilterQuery}
-                      onChange={(e) => setTraceFilterQuery(e.target.value)}
-                      className="bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-xs text-slate-800 placeholder:text-slate-400 font-mono focus:outline-indigo-600 focus:ring-1 focus:ring-indigo-600 w-72"
-                    />
-                  </div>
-                  <span className="text-xs text-slate-500 font-mono">
-                    Showing {filteredLinks.length} of {masterGraphData.total_links} total links
-                  </span>
-                </div>
+                      <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-2xs">
+                        <span className="text-[11px] font-medium text-slate-500 uppercase tracking-wider block">
+                          Max Hop Depth
+                        </span>
+                        <p className="text-2xl font-extrabold text-slate-900 font-mono mt-1">
+                          3 Layers
+                        </p>
+                        <span className="text-[10px] text-emerald-600 font-medium">Zero-Cycle Loop Safety</span>
+                      </div>
+                    </div>
 
-                {/* Embedded WebGL Force Graph with Time-Travel Slider in Detailed Modal */}
-                <div className="h-[460px] w-full rounded-xl overflow-hidden border border-slate-200 shadow-xs bg-slate-50">
-                  <NetworkGraph
-                    nodes={masterGraphData.nodes}
-                    links={masterGraphData.links}
-                    victimId={masterGraphData.victim_id}
-                    totalVolume={masterGraphData.total_volume}
-                  />
-                </div>
-
-                {/* SECTION 1: THE VICTIM (HOP 0) */}
-                <div className="rounded-xl border border-emerald-200 bg-white overflow-hidden shadow-xs">
-                  <div
-                    onClick={() => toggleLayer('victim')}
-                    className="p-4 bg-emerald-50/70 border-b border-emerald-100 flex items-center justify-between cursor-pointer hover:bg-emerald-50 transition"
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <span className="h-3 w-3 rounded-full bg-emerald-500"></span>
-                      <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-800">
-                        Section 1: Starting Account (Hop 0 - Source of Funds)
-                      </h3>
-                      <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 border border-emerald-200 text-[11px] font-mono font-bold">
-                        1 Account
+                    {/* Filter within Detailed Report */}
+                    <div className="flex items-center justify-between gap-3 bg-white p-3 rounded-xl border border-slate-200 shadow-2xs">
+                      <div className="flex items-center gap-2">
+                        <Search className="h-4 w-4 text-slate-400" />
+                        <input
+                          type="text"
+                          placeholder="Search within report links (account, narration, amount)..."
+                          value={traceFilterQuery}
+                          onChange={(e) => setTraceFilterQuery(e.target.value)}
+                          className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs text-slate-800 placeholder:text-slate-400 font-mono focus:outline-indigo-600 focus:ring-1 focus:ring-indigo-600 w-72"
+                        />
+                      </div>
+                      <span className="text-xs text-slate-500 font-mono">
+                        Showing {filteredLinks.length} of {masterGraphData.total_links} total links
                       </span>
                     </div>
-                    {openLayers.victim ? <ChevronUp className="h-4 w-4 text-emerald-700" /> : <ChevronDown className="h-4 w-4 text-emerald-700" />}
+
+                    {/* Forensic Analytics Charts in Trace Modal */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <InflowOutflowDonutChart
+                        totalInflow={masterGraphData.total_volume}
+                        totalOutflow={layer1Total}
+                      />
+                      <TimelineVolumeBarChart
+                        links={masterGraphData.links}
+                      />
+                    </div>
+
+                {/* SECTION 0: SOURCE OF FUNDS (HOP -1 - INBOUND FEEDERS) */}
+                {sourceOfFundsLinks.length > 0 && (
+                  <div className="rounded-xl border border-emerald-200 bg-white overflow-hidden shadow-xs">
+                    <div
+                       onClick={() => toggleLayer('source_of_funds')}
+                      className="p-4 bg-emerald-50/70 border-b border-emerald-100 flex items-center justify-between cursor-pointer hover:bg-emerald-50 transition"
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <span className="h-3 w-3 rounded-full bg-emerald-500"></span>
+                        <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-800">
+                          Section 0: Source of Funds (Hop -1 - Inbound Feeders)
+                        </h3>
+                        <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200 text-[11px] font-mono font-bold">
+                          {sourceOfFundsLinks.length} Inbound Transfers &bull; ₹{sourceOfFundsTotal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </span>
+                      </div>
+                      {openLayers.source_of_funds ? <ChevronUp className="h-4 w-4 text-emerald-700" /> : <ChevronDown className="h-4 w-4 text-emerald-700" />}
+                    </div>
+
+                    {openLayers.source_of_funds && (
+                      <div className="p-3 bg-emerald-50/20 max-h-80 overflow-y-auto">
+                        <table className="w-full text-left text-xs font-mono">
+                          <thead className="bg-emerald-100/60 text-emerald-900 uppercase text-[10px] tracking-wider border-b border-emerald-200">
+                            <tr>
+                              <th className="px-3.5 py-2">Feeder / Origin (Source of Funds)</th>
+                              <th className="px-3.5 py-2">Target Hub (Suspect)</th>
+                              <th className="px-3.5 py-2 text-right">Inflow Amount (INR)</th>
+                              <th className="px-3.5 py-2">Timestamp</th>
+                              <th className="px-3.5 py-2">Narration</th>
+                              <th className="px-3.5 py-2">Payment Mode</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100 text-slate-700">
+                            {sourceOfFundsLinks.map((l, idx) => (
+                              <tr key={idx} className="hover:bg-emerald-50/60 transition">
+                                <td className="px-3.5 py-2 text-emerald-800 font-bold flex items-center gap-1.5">
+                                  <span className="h-2 w-2 rounded-full bg-emerald-500"></span>
+                                  {l.source}
+                                </td>
+                                <td className="px-3.5 py-2 text-slate-800 font-semibold">{l.target}</td>
+                                <td className="px-3.5 py-2 text-right font-bold text-emerald-600">
+                                  ₹{l.amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </td>
+                                <td className="px-3.5 py-2 text-slate-500">{l.timestamp}</td>
+                                <td className="px-3.5 py-2 text-[11px] text-slate-600 font-sans max-w-[200px] truncate" title={l.transaction_narration || l.narration || ''}>
+                                  {l.transaction_narration || l.narration || '-'}
+                                </td>
+                                <td className="px-3.5 py-2">
+                                  <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[10px] font-bold">
+                                    {l.payment_mode || 'STANDARD'}
+                                  </span>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* SECTION 1: TARGET HUB (HOP 0 - PRIMARY LAUNDERING SUSPECT) */}
+                <div className="rounded-xl border border-rose-200 bg-white overflow-hidden shadow-xs">
+                  <div
+                    onClick={() => toggleLayer('victim')}
+                    className="p-4 bg-rose-50/70 border-b border-rose-100 flex items-center justify-between cursor-pointer hover:bg-rose-50 transition"
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <span className="h-3 w-3 rounded-full bg-rose-500"></span>
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-rose-800">
+                        Section 1: Target Hub (Hop 0 - Primary Laundering Suspect)
+                      </h3>
+                      <span className="px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 border border-rose-200 text-[11px] font-mono font-bold">
+                        Primary Suspect
+                      </span>
+                    </div>
+                    {openLayers.victim ? <ChevronUp className="h-4 w-4 text-rose-700" /> : <ChevronDown className="h-4 w-4 text-rose-700" />}
                   </div>
 
                   {openLayers.victim && (
-                    <div className="p-4 bg-emerald-50/30">
-                      <div className="flex items-center justify-between p-3.5 rounded-lg bg-white border border-emerald-200">
+                    <div className="p-4 bg-rose-50/30">
+                      <div className="flex items-center justify-between p-3.5 rounded-lg bg-white border border-rose-200">
                         <div>
                           <span className="text-[11px] font-mono text-slate-500 uppercase">Target Investigated ID:</span>
                           <p className="text-base font-bold font-mono text-slate-900 mt-0.5">{masterGraphData.victim_id}</p>
                         </div>
                         <div className="text-right">
-                          <span className="text-[11px] font-mono text-slate-500 uppercase">Immediate Layer 1 Outflow:</span>
-                          <p className="text-sm font-bold font-mono text-emerald-600 mt-0.5">
-                            ${layer1Total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          <span className="text-[11px] font-mono text-slate-500 uppercase">Immediate Dispersal Outflow:</span>
+                          <p className="text-sm font-bold font-mono text-rose-600 mt-0.5">
+                            ₹{layer1Total.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                           </p>
                         </div>
                       </div>
@@ -3032,7 +3526,7 @@ export default function App() {
                         Section 2: Layer 1 (Primary Money Mules)
                       </h3>
                       <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200 text-[11px] font-mono font-bold">
-                        {layer1Links.length} Transfers &bull; ${layer1Total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        {layer1Links.length} Transfers &bull; ₹{layer1Total.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </span>
                     </div>
                     {openLayers.layer_1 ? <ChevronUp className="h-4 w-4 text-amber-700" /> : <ChevronDown className="h-4 w-4 text-amber-700" />}
@@ -3045,8 +3539,9 @@ export default function App() {
                           <tr>
                             <th className="px-3.5 py-2">Source (Origin)</th>
                             <th className="px-3.5 py-2">Target (Primary Mule)</th>
-                            <th className="px-3.5 py-2 text-right">Amount (USD)</th>
+                            <th className="px-3.5 py-2 text-right">Amount (INR)</th>
                             <th className="px-3.5 py-2">Timestamp</th>
+                            <th className="px-3.5 py-2">Narration</th>
                             <th className="px-3.5 py-2">Forensic Device & IP</th>
                             <th className="px-3.5 py-2 text-center">Mode</th>
                           </tr>
@@ -3060,9 +3555,12 @@ export default function App() {
                                 {l.target}
                               </td>
                               <td className="px-3.5 py-2 text-right font-bold text-emerald-600">
-                                ${l.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                ₹{l.amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                               </td>
                               <td className="px-3.5 py-2 text-slate-500 text-[11px]">{l.timestamp}</td>
+                              <td className="px-3.5 py-2 text-[11px] text-slate-600 font-sans max-w-[200px] truncate" title={l.transaction_narration || l.narration || ''}>
+                                {l.transaction_narration || l.narration || '-'}
+                              </td>
                               <td className="px-3.5 py-2 text-[11px] text-slate-600 font-sans">
                                 <span className="inline-flex items-center gap-1 text-[10px] text-slate-500">
                                   {l.ip_address || '103.21.244.18'} &bull; {l.device_type || 'Mobile'}
@@ -3093,7 +3591,7 @@ export default function App() {
                         Section 3: Layer 2 (Distributors & Intermediate Smurfs)
                       </h3>
                       <span className="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 border border-indigo-200 text-[11px] font-mono font-bold">
-                        {layer2Links.length} Transfers &bull; ${layer2Total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        {layer2Links.length} Transfers &bull; ₹{layer2Total.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </span>
                     </div>
                     {openLayers.layer_2 ? <ChevronUp className="h-4 w-4 text-indigo-700" /> : <ChevronDown className="h-4 w-4 text-indigo-700" />}
@@ -3106,8 +3604,9 @@ export default function App() {
                           <tr>
                             <th className="px-3.5 py-2">Source (Layer 1 Mule)</th>
                             <th className="px-3.5 py-2">Target (Layer 2 Distributor)</th>
-                            <th className="px-3.5 py-2 text-right">Amount (USD)</th>
+                            <th className="px-3.5 py-2 text-right">Amount (INR)</th>
                             <th className="px-3.5 py-2">Timestamp</th>
+                            <th className="px-3.5 py-2">Narration</th>
                             <th className="px-3.5 py-2">Forensic Device & IP</th>
                             <th className="px-3.5 py-2 text-center">Mode</th>
                           </tr>
@@ -3121,9 +3620,12 @@ export default function App() {
                                 {l.target}
                               </td>
                               <td className="px-3.5 py-2 text-right font-bold text-emerald-600">
-                                ${l.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                ₹{l.amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                               </td>
                               <td className="px-3.5 py-2 text-slate-500 text-[11px]">{l.timestamp}</td>
+                              <td className="px-3.5 py-2 text-[11px] text-slate-600 font-sans max-w-[200px] truncate" title={l.transaction_narration || l.narration || ''}>
+                                {l.transaction_narration || l.narration || '-'}
+                              </td>
                               <td className="px-3.5 py-2 text-[11px] text-slate-600 font-sans">
                                 <span className="inline-flex items-center gap-1 text-[10px] text-slate-500">
                                   {l.ip_address || '103.21.244.18'} &bull; {l.device_type || 'Mobile'}
@@ -3154,7 +3656,7 @@ export default function App() {
                         Section 4: Layer 3 (Terminal Cashout & Exit Nodes)
                       </h3>
                       <span className="px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 border border-rose-200 text-[11px] font-mono font-bold">
-                        {layer3Links.length} Transfers &bull; ${layer3Total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        {layer3Links.length} Transfers &bull; ₹{layer3Total.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </span>
                     </div>
                     {openLayers.layer_3 ? <ChevronUp className="h-4 w-4 text-rose-700" /> : <ChevronDown className="h-4 w-4 text-rose-700" />}
@@ -3167,8 +3669,9 @@ export default function App() {
                           <tr>
                             <th className="px-3.5 py-2">Source (Layer 2)</th>
                             <th className="px-3.5 py-2">Terminal Target (Sec 91 Freeze Candidate)</th>
-                            <th className="px-3.5 py-2 text-right">Amount (USD)</th>
+                            <th className="px-3.5 py-2 text-right">Amount (INR)</th>
                             <th className="px-3.5 py-2">Timestamp</th>
+                            <th className="px-3.5 py-2">Narration</th>
                             <th className="px-3.5 py-2">Forensic Device & IP</th>
                             <th className="px-3.5 py-2 text-center">Mode</th>
                           </tr>
@@ -3182,9 +3685,12 @@ export default function App() {
                                 {l.target}
                               </td>
                               <td className="px-3.5 py-2 text-right font-bold text-emerald-600">
-                                ${l.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                ₹{l.amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                               </td>
                               <td className="px-3.5 py-2 text-slate-500 text-[11px]">{l.timestamp}</td>
+                              <td className="px-3.5 py-2 text-[11px] text-slate-600 font-sans max-w-[200px] truncate" title={l.transaction_narration || l.narration || ''}>
+                                {l.transaction_narration || l.narration || '-'}
+                              </td>
                               <td className="px-3.5 py-2 text-[11px] text-slate-600 font-sans">
                                 <span className="inline-flex items-center gap-1 text-[10px] text-slate-500">
                                   {l.ip_address || '103.21.244.18'} &bull; {l.device_type || 'Mobile'}
@@ -3203,8 +3709,8 @@ export default function App() {
                   )}
                 </div>
               </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -3270,13 +3776,30 @@ export default function App() {
                 className={`flex flex-col ${m.sender === 'user' ? 'items-end' : 'items-start'}`}
               >
                 <div
-                  className={`max-w-[88%] rounded-2xl p-3.5 leading-relaxed whitespace-pre-line ${
+                  className={`max-w-[88%] rounded-2xl p-3.5 leading-relaxed ${
                     m.sender === 'user'
-                      ? 'bg-indigo-600 text-white font-medium rounded-br-xs shadow-xs'
-                      : 'bg-white text-slate-800 border border-slate-200 rounded-bl-xs shadow-xs'
+                      ? 'bg-indigo-600 text-white font-medium rounded-br-xs shadow-xs whitespace-pre-line'
+                      : 'bg-white text-slate-800 border border-slate-200 rounded-bl-xs shadow-xs text-xs'
                   }`}
                 >
-                  {m.text}
+                  {m.sender === 'ai' ? (
+                    <ReactMarkdown
+                      components={{
+                        p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>,
+                        ul: ({ children }) => <ul className="list-disc pl-4 mb-2 space-y-1">{children}</ul>,
+                        ol: ({ children }) => <ol className="list-decimal pl-4 mb-2 space-y-1">{children}</ol>,
+                        li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+                        strong: ({ children }) => <strong className="font-bold text-slate-900">{children}</strong>,
+                        h3: ({ children }) => <h3 className="font-bold text-slate-900 text-xs mt-2 mb-1 uppercase tracking-wider">{children}</h3>,
+                        h4: ({ children }) => <h4 className="font-bold text-slate-900 text-[11px] mt-1.5 mb-0.5">{children}</h4>,
+                        code: ({ children }) => <code className="bg-slate-100 text-indigo-700 px-1 py-0.5 rounded font-mono text-[11px]">{children}</code>,
+                      }}
+                    >
+                      {m.text}
+                    </ReactMarkdown>
+                  ) : (
+                    m.text
+                  )}
                 </div>
 
                 {/* Interactive Action Buttons inside AI messages */}
@@ -3317,30 +3840,42 @@ export default function App() {
             <div ref={chatEndRef} />
           </div>
 
-          {/* Quick Prompts Strip */}
-          <div className="px-3 py-2 bg-white border-t border-slate-200 flex items-center gap-1.5 overflow-x-auto no-scrollbar">
-            <button
-              type="button"
-              onClick={() => handleSendChatMessage('Analyze victim account KKBK10000405')}
-              className="shrink-0 px-2.5 py-1 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] font-medium border border-slate-200 transition cursor-pointer"
-            >
-              Analyze KKBK10000405
-            </button>
-            <button
-              type="button"
-              onClick={() => handleSendChatMessage('What accounts show rapid panic transfers?')}
-              className="shrink-0 px-2.5 py-1 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] font-medium border border-slate-200 transition cursor-pointer"
-            >
-              Check Panic Velocity
-            </button>
-            <button
-              type="button"
-              onClick={() => handleSendChatMessage('Identify top mule hubs by wash ratio')}
-              className="shrink-0 px-2.5 py-1 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] font-medium border border-slate-200 transition cursor-pointer"
-            >
-              Top Mule Hubs
-            </button>
-          </div>
+          {/* Quick Prompts Strip (Only active when data is ingested) */}
+          {totalRows > 0 && (
+            <div className="px-3 py-2 bg-white border-t border-slate-200 flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+              <button
+                type="button"
+                onClick={() => handleSendChatMessage('Analyze full dataset macro trends and top suspect')}
+                className="shrink-0 px-2.5 py-1 rounded-full bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-[10px] font-bold border border-indigo-200 transition cursor-pointer flex items-center gap-1 shadow-2xs"
+              >
+                <Sparkles className="h-3 w-3 text-indigo-600" />
+                <span>Analyze Full Dataset</span>
+              </button>
+              {topSuspectAccount && (
+                <button
+                  type="button"
+                  onClick={() => handleSendChatMessage(`Analyze priority suspect ${topSuspectAccount}`)}
+                  className="shrink-0 px-2.5 py-1 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] font-medium border border-slate-200 transition cursor-pointer"
+                >
+                  Analyze {topSuspectAccount}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => handleSendChatMessage('What accounts show rapid panic transfers?')}
+                className="shrink-0 px-2.5 py-1 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] font-medium border border-slate-200 transition cursor-pointer"
+              >
+                Check Panic Velocity
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSendChatMessage('Identify top mule hubs by wash ratio')}
+                className="shrink-0 px-2.5 py-1 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] font-medium border border-slate-200 transition cursor-pointer"
+              >
+                Top Mule Hubs
+              </button>
+            </div>
+          )}
 
           {/* Chat Input */}
           <form
@@ -3354,7 +3889,11 @@ export default function App() {
               type="text"
               value={chatInput}
               onChange={(e) => setChatInput(e.target.value)}
-              placeholder="Ask AI or 'Analyze victim account KKBK10000405'..."
+              placeholder={
+                totalRows > 0
+                  ? (topSuspectAccount ? `Ask AI or 'Analyze suspect ${topSuspectAccount}'...` : "Ask AI about transactions or patterns...")
+                  : "Upload a CSV dataset to begin investigation..."
+              }
               className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-800 placeholder:text-slate-400 focus:outline-indigo-600 focus:ring-1 focus:ring-indigo-600 font-sans"
             />
             <button
@@ -3427,7 +3966,7 @@ export default function App() {
                         <span className="text-[11px] text-rose-700">Immediate debit freeze on suspected fraud proceeds.</span>
                       </div>
                       <span className="font-mono font-bold text-rose-700 text-sm">
-                        ${sec91Target.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        ₹{sec91Target.amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </span>
                     </div>
 

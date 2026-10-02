@@ -294,7 +294,7 @@ def get_transactions_paginated(page: int = 1, limit: int = 50) -> Dict[str, Any]
 
 
 def _build_suspicious_cache(conn: duckdb.DuckDBPyConnection) -> None:
-    """Internal helper to build the cached suspicious accounts table for 1ms pagination."""
+    """Internal helper to build the cached suspicious accounts table with deterministic AML heuristics."""
     query = """
     CREATE OR REPLACE TABLE suspicious_cache AS
     WITH flagged_txns AS (
@@ -308,20 +308,13 @@ def _build_suspicious_cache(conn: duckdb.DuckDBPyConnection) -> None:
             COALESCE(TRY_CAST(payment_mode AS VARCHAR), '') AS payment_mode,
             COALESCE(TRY_CAST(narration AS VARCHAR), '') AS narration,
             
-            -- Device Anomaly (+35)
+            -- Metadata Anomaly: Emulator / VM or VPN / Proxy / Tor / Flagged IP (+15)
             CASE 
                 WHEN LOWER(device_type) LIKE '%emulator%' 
                   OR LOWER(device_type) LIKE '%bluestacks%' 
                   OR LOWER(device_type) LIKE '%nox%' 
                   OR LOWER(device_type) LIKE '%vm%' 
-                  OR LOWER(device_type) LIKE '%linux%'
-                THEN 35 
-                ELSE 0 
-            END AS dev_score,
-            
-            -- Foreign/Proxy IP (+35)
-            CASE 
-                WHEN ip_address LIKE '185.%' 
+                  OR ip_address LIKE '185.%' 
                   OR ip_address LIKE '194.%' 
                   OR ip_address LIKE '45.%' 
                   OR ip_address LIKE '104.%' 
@@ -329,34 +322,25 @@ def _build_suspicious_cache(conn: duckdb.DuckDBPyConnection) -> None:
                   OR LOWER(ip_address) LIKE '%vpn%' 
                   OR LOWER(ip_address) LIKE '%tor%' 
                   OR LOWER(ip_address) LIKE '%proxy%'
-                THEN 35 
+                THEN 15 
                 ELSE 0 
-            END AS ip_score,
+            END AS meta_score,
             
-            -- Structuring / Smurfing (+20)
+            -- Structuring / Smurfing: Amount near reporting thresholds ($9k-$9,999 or INR 49,000-49,999)
             CASE 
-                WHEN amount BETWEEN 49000 AND 49999 
-                THEN 20 
+                WHEN (amount BETWEEN 9000 AND 9999) 
+                  OR (amount BETWEEN 49000 AND 49999)
+                THEN 1 
                 ELSE 0 
-            END AS struct_score,
+            END AS is_structured_txn,
             
-            -- Time / Velocity Anomaly (+10) - nocturnal between 02:00 and 04:59
+            -- Temporal: Nocturnal transactions between 01:00 AM and 05:00 AM
             CASE 
-                WHEN (EXTRACT(HOUR FROM TRY_CAST(timestamp AS TIMESTAMP)) BETWEEN 2 AND 4)
-                  OR (TRY_CAST(SUBSTRING(TRY_CAST(timestamp AS VARCHAR), 12, 2) AS INT) BETWEEN 2 AND 4)
-                THEN 10 
+                WHEN (EXTRACT(HOUR FROM TRY_CAST(timestamp AS TIMESTAMP)) BETWEEN 1 AND 4)
+                  OR (TRY_CAST(SUBSTRING(TRY_CAST(timestamp AS VARCHAR), 12, 2) AS INT) BETWEEN 1 AND 4)
+                THEN 1 
                 ELSE 0 
-            END AS time_score,
-            
-            -- Narration Pattern (+10)
-            CASE 
-                WHEN narration IS NULL 
-                  OR TRIM(narration) = '' 
-                  OR LOWER(narration) LIKE '%transfer%' 
-                  OR LOWER(narration) LIKE '%test%'
-                THEN 10 
-                ELSE 0 
-            END AS narr_score
+            END AS is_nocturnal_txn
         FROM transactions
     ),
     account_out AS (
@@ -364,13 +348,12 @@ def _build_suspicious_cache(conn: duckdb.DuckDBPyConnection) -> None:
             sender AS account,
             COUNT(*) AS out_txns,
             SUM(amount) AS total_out,
+            AVG(amount) AS avg_out_amount,
+            SUM(is_structured_txn) AS structured_out_txns,
+            SUM(is_nocturnal_txn) AS nocturnal_out_txns,
+            MAX(meta_score) AS out_meta_score,
             MIN(TRY_CAST(timestamp AS TIMESTAMP)) AS min_out_ts,
             MAX(TRY_CAST(timestamp AS TIMESTAMP)) AS max_out_ts,
-            MAX(dev_score) AS dev_score,
-            MAX(ip_score) AS ip_score,
-            MAX(struct_score) AS struct_score,
-            MAX(time_score) AS time_score,
-            MAX(narr_score) AS narr_score,
             MODE(device_type) AS primary_device,
             MODE(ip_address) AS primary_ip
         FROM flagged_txns
@@ -381,13 +364,12 @@ def _build_suspicious_cache(conn: duckdb.DuckDBPyConnection) -> None:
             receiver AS account,
             COUNT(*) AS in_txns,
             SUM(amount) AS total_in,
+            AVG(amount) AS avg_in_amount,
+            SUM(is_structured_txn) AS structured_in_txns,
+            SUM(is_nocturnal_txn) AS nocturnal_in_txns,
+            MAX(meta_score) AS in_meta_score,
             MIN(TRY_CAST(timestamp AS TIMESTAMP)) AS min_in_ts,
             MAX(TRY_CAST(timestamp AS TIMESTAMP)) AS max_in_ts,
-            MAX(dev_score) AS dev_score,
-            MAX(ip_score) AS ip_score,
-            MAX(struct_score) AS struct_score,
-            MAX(time_score) AS time_score,
-            MAX(narr_score) AS narr_score,
             MODE(device_type) AS primary_device,
             MODE(ip_address) AS primary_ip
         FROM flagged_txns
@@ -401,52 +383,101 @@ def _build_suspicious_cache(conn: duckdb.DuckDBPyConnection) -> None:
             COALESCE(o.out_txns, 0) + COALESCE(i.in_txns, 0) AS total_txns,
             COALESCE(i.in_txns, 0) AS in_count,
             COALESCE(o.out_txns, 0) AS out_count,
-            GREATEST(COALESCE(o.dev_score, 0), COALESCE(i.dev_score, 0)) AS dev_score,
-            GREATEST(COALESCE(o.ip_score, 0), COALESCE(i.ip_score, 0)) AS ip_score,
-            GREATEST(COALESCE(o.struct_score, 0), COALESCE(i.struct_score, 0)) AS struct_score,
-            GREATEST(COALESCE(o.time_score, 0), COALESCE(i.time_score, 0)) AS time_score,
-            GREATEST(COALESCE(o.narr_score, 0), COALESCE(i.narr_score, 0)) AS narr_score,
-            
-            -- Panic / Rapid Transfers Heuristic (+25)
-            -- Flag accounts that receive funds and immediately transfer them out within minutes (velocity)
-            CASE 
-                WHEN i.min_in_ts IS NOT NULL 
-                 AND o.min_out_ts IS NOT NULL 
-                 AND COALESCE(i.total_in, 0.0) > 0 
-                 AND COALESCE(o.total_out, 0.0) > 0
-                 AND (
-                     (o.min_out_ts >= i.min_in_ts AND EXTRACT(EPOCH FROM (o.min_out_ts - i.min_in_ts)) <= 1800)
-                     OR (ABS(EXTRACT(EPOCH FROM (o.min_out_ts - i.min_in_ts))) <= 900)
-                     OR (ABS(EXTRACT(EPOCH FROM (o.max_out_ts - i.min_in_ts))) <= 1800)
-                 )
-                THEN 25
-                ELSE 0
-            END AS rapid_score,
-
+            COALESCE(i.avg_in_amount, 0.0) AS avg_in_amount,
+            COALESCE(o.avg_out_amount, 0.0) AS avg_out_amount,
+            COALESCE(o.structured_out_txns, 0) + COALESCE(i.structured_in_txns, 0) AS total_structured_txns,
+            COALESCE(o.nocturnal_out_txns, 0) + COALESCE(i.nocturnal_in_txns, 0) AS total_nocturnal_txns,
+            GREATEST(COALESCE(o.out_meta_score, 0), COALESCE(i.in_meta_score, 0)) AS meta_score,
+            i.min_in_ts,
+            o.min_out_ts,
+            o.max_out_ts,
             COALESCE(o.primary_device, i.primary_device, '') AS primary_device,
             COALESCE(o.primary_ip, i.primary_ip, '') AS primary_ip
         FROM account_out o
         FULL OUTER JOIN account_in i ON o.account = i.account
+    ),
+    scored_accounts AS (
+        SELECT 
+            account,
+            ROUND(total_in, 2) AS total_in,
+            ROUND(total_out, 2) AS total_out,
+            total_txns,
+            in_count,
+            out_count,
+            
+            -- Heuristic 1: Velocity / Wash Ratio (+40 pts)
+            -- (Total Outflow / Total Inflow) > 0.95 within 24h or rapid relay
+            CASE 
+                WHEN total_in > 0 AND total_out > 0 AND (total_out / total_in) >= 0.95 
+                     AND (
+                         min_in_ts IS NULL OR min_out_ts IS NULL 
+                         OR ABS(EXTRACT(EPOCH FROM (min_out_ts - min_in_ts))) <= 86400
+                         OR ABS(EXTRACT(EPOCH FROM (max_out_ts - min_in_ts))) <= 86400
+                     )
+                THEN 40
+                WHEN min_in_ts IS NOT NULL AND min_out_ts IS NOT NULL 
+                     AND ABS(EXTRACT(EPOCH FROM (min_out_ts - min_in_ts))) <= 1800 
+                     AND total_out > 0 AND total_in > 0
+                THEN 40
+                ELSE 0
+            END AS velocity_score,
+
+            -- Heuristic 2: Structuring / Threshold Evasion (+30 pts)
+            -- Avg transaction amount between $9k-$9,999 (or INR 49k-49,999) or structured txns
+            CASE 
+                WHEN total_structured_txns > 0
+                  OR (avg_in_amount BETWEEN 9000 AND 9999)
+                  OR (avg_in_amount BETWEEN 49000 AND 49999)
+                  OR (avg_out_amount BETWEEN 9000 AND 9999)
+                  OR (avg_out_amount BETWEEN 49000 AND 49999)
+                THEN 30
+                ELSE 0
+            END AS struct_score,
+
+            -- Heuristic 3: Metadata Anomalies (+15 pts)
+            -- Device type contains 'Emulator' / VM or IP address is flagged / VPN
+            CASE 
+                WHEN meta_score > 0
+                  OR LOWER(primary_device) LIKE '%emulator%'
+                  OR LOWER(primary_device) LIKE '%vm%'
+                  OR primary_ip LIKE '185.%' OR primary_ip LIKE '194.%' OR primary_ip LIKE '45.%' 
+                  OR primary_ip LIKE '104.%' OR primary_ip LIKE '198.%'
+                  OR LOWER(primary_ip) LIKE '%vpn%' OR LOWER(primary_ip) LIKE '%tor%' OR LOWER(primary_ip) LIKE '%proxy%'
+                THEN 15
+                ELSE 0
+            END AS meta_score,
+
+            -- Heuristic 4: Temporal Anomalies (+15 pts)
+            -- >50% transactions between 01:00 AM and 05:00 AM
+            CASE 
+                WHEN total_txns > 0 AND (CAST(total_nocturnal_txns AS DOUBLE) / total_txns) >= 0.50
+                THEN 15
+                WHEN total_nocturnal_txns > 0 AND (CAST(total_nocturnal_txns AS DOUBLE) / total_txns) >= 0.33
+                THEN 15
+                ELSE 0
+            END AS temporal_score,
+
+            primary_device,
+            primary_ip
+        FROM merged_accounts
     )
     SELECT 
         account,
-        ROUND(total_in, 2) AS total_in,
-        ROUND(total_out, 2) AS total_out,
+        total_in,
+        total_out,
         total_txns,
         in_count,
         out_count,
-        dev_score,
-        ip_score,
+        velocity_score,
         struct_score,
-        time_score,
-        narr_score,
-        rapid_score,
+        meta_score,
+        temporal_score,
         primary_device,
         primary_ip,
         -- STRICT RULE: Final aggregated risk_score MUST be capped at 99% (never 100%)
-        LEAST(99, dev_score + ip_score + struct_score + time_score + narr_score + rapid_score) AS risk_score
-    FROM merged_accounts
-    WHERE (dev_score + ip_score + struct_score + time_score + narr_score + rapid_score) > 0
+        LEAST(99, velocity_score + struct_score + meta_score + temporal_score) AS risk_score
+    FROM scored_accounts
+    WHERE (velocity_score + struct_score + meta_score + temporal_score) > 0
     ORDER BY risk_score DESC, (total_in + total_out) DESC;
     """
     conn.execute(query)
@@ -455,7 +486,7 @@ def _build_suspicious_cache(conn: duckdb.DuckDBPyConnection) -> None:
 def get_suspicious_accounts(page: int = 1, limit: int = 50, search: Optional[str] = None) -> Dict[str, Any]:
     """
     Paginated Suspicious Activity Detection (?page=1&limit=50&search=...).
-    Uses cached scoring table with Panic/Rapid Transfers heuristic, strict 99% cap,
+    Uses cached scoring table with concrete deterministic AML heuristics, strict 99% cap,
     and structured Threat Intelligence Reports.
     """
     conn = get_connection()
@@ -466,13 +497,13 @@ def get_suspicious_accounts(page: int = 1, limit: int = 50, search: Optional[str
             if not table_check or table_check[0] == 0:
                 return {"total_rows": 0, "page": page, "limit": limit, "total_pages": 0, "data": []}
 
-            # Check if cache exists and has rapid_score column, if not rebuild it
+            # Check if cache exists and has velocity_score column, if not rebuild it
             cache_check = conn.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'suspicious_cache'").fetchone()
             rebuild_cache = not cache_check or cache_check[0] == 0
             if not rebuild_cache:
                 cols_check = conn.execute("DESCRIBE suspicious_cache").fetchall()
                 existing_cols = {c[0].lower() for c in cols_check}
-                if "rapid_score" not in existing_cols:
+                if "velocity_score" not in existing_cols:
                     rebuild_cache = True
 
             if rebuild_cache:
@@ -503,7 +534,7 @@ def get_suspicious_accounts(page: int = 1, limit: int = 50, search: Optional[str
             data_query = f"""
                 SELECT 
                     account, total_in, total_out, total_txns, in_count, out_count,
-                    dev_score, ip_score, struct_score, time_score, narr_score, rapid_score,
+                    velocity_score, struct_score, meta_score, temporal_score,
                     primary_device, primary_ip, risk_score
                 FROM suspicious_cache
                 {where_clause}
@@ -524,33 +555,27 @@ def get_suspicious_accounts(page: int = 1, limit: int = 50, search: Optional[str
                 in_count = int(r[4]) if r[4] is not None else 0
                 out_count = int(r[5]) if r[5] is not None else 0
 
-                dev_score = int(r[6]) if r[6] is not None else 0
-                ip_score = int(r[7]) if r[7] is not None else 0
-                struct_score = int(r[8]) if r[8] is not None else 0
-                time_score = int(r[9]) if r[9] is not None else 0
-                narr_score = int(r[10]) if r[10] is not None else 0
-                rapid_score = int(r[11]) if r[11] is not None else 0
-                primary_device = str(r[12]) if r[12] is not None else ""
-                primary_ip = str(r[13]) if r[13] is not None else ""
-                score = int(r[14]) if r[14] is not None else 0
+                velocity_score = int(r[6]) if r[6] is not None else 0
+                struct_score = int(r[7]) if r[7] is not None else 0
+                meta_score = int(r[8]) if r[8] is not None else 0
+                temporal_score = int(r[9]) if r[9] is not None else 0
+                primary_device = str(r[10]) if r[10] is not None else ""
+                primary_ip = str(r[11]) if r[11] is not None else ""
+                score = int(r[12]) if r[12] is not None else 0
 
                 # STRICT RULE: Must be capped at 99%, never 100%
                 score = min(99, max(0, score))
 
-                # Human-readable risk factors
+                # Concrete human-readable risk factors matching heuristic engine
                 factors = []
-                if dev_score > 0:
-                    factors.append(f"Device Anomaly: Emulator / VM / Linux Signature ({primary_device})" if primary_device else "Device Anomaly: Emulator / VM Signature")
-                if ip_score > 0:
-                    factors.append(f"Foreign / Proxy / VPN IP Detected ({primary_ip})" if primary_ip else "Foreign / Proxy IP Detected")
+                if velocity_score > 0:
+                    factors.append("Velocity Anomaly: Rapid Pass-Through (>95% Dispersed within 24h)")
                 if struct_score > 0:
-                    factors.append("AML Structuring Alert: Amounts between $49,000 - $49,999")
-                if rapid_score > 0:
-                    factors.append("Panic / Rapid Transfer: Immediate relay within minutes (Velocity)")
-                if time_score > 0:
-                    factors.append("Nocturnal Activity: Off-hours Transactions (02:00 - 04:59 AM)")
-                if narr_score > 0:
-                    factors.append("Suspicious Narration Pattern ('transfer' / 'test' / blank)")
+                    factors.append("AML Structuring Alert: Amounts near Mandatory Threshold (₹49k-₹49,999)")
+                if meta_score > 0:
+                    factors.append(f"Metadata Anomaly: {primary_device or 'Emulator/VM'} / {primary_ip or 'Proxy/VPN'}")
+                if temporal_score > 0:
+                    factors.append("Temporal Anomaly: Nocturnal Bursts (01:00 - 05:00 AM)")
 
                 # Wash ratio
                 wash_ratio = 0.0
@@ -564,7 +589,7 @@ def get_suspicious_accounts(page: int = 1, limit: int = 50, search: Optional[str
                 else:
                     risk_level = "ELEVATED"
 
-                # PHASE 4: Instant AI Threat Intelligence Report Object
+                # Instant AI Threat Intelligence Report Object
                 mule_role = "Terminal Cash-Out Suspect" if out_count == 0 else "Layering & Aggregation Mule Hub" if (in_count > 1 and out_count > 1) else "Intermediary Passthrough Node"
                 wash_desc = f"{wash_ratio}% funds dispersed" if wash_ratio > 0 else "100% retention / destination"
                 
@@ -579,11 +604,11 @@ def get_suspicious_accounts(page: int = 1, limit: int = 50, search: Optional[str
                     "money_laundering_flow": {
                         "volume": total_volume,
                         "structuring_detected": struct_score > 0,
-                        "description": f"Processed ${total_volume:,.2f} cumulative volume. " + ("Structured transactions detected in the $49,000 - $49,999 range to evade mandatory regulatory reporting." if struct_score > 0 else "Flow velocity matches syndicated smurfing networks.")
+                        "description": f"Processed ₹{total_volume:,.2f} cumulative volume. " + ("Structured transactions detected in the ₹49,000 - ₹49,999 range to evade mandatory regulatory reporting." if struct_score > 0 else "Flow velocity matches syndicated smurfing networks.")
                     },
                     "rapid_transfer_velocity": {
-                        "panic_detected": rapid_score > 0 or wash_ratio >= 80,
-                        "description": "High-velocity panic transfer: funds were immediately relayed downstream within minutes of receipt to prevent trace recovery." if (rapid_score > 0 or wash_ratio >= 80) else "Sequential settlement velocity observed."
+                        "panic_detected": velocity_score > 0 or wash_ratio >= 80,
+                        "description": "High-velocity panic transfer: funds were immediately relayed downstream within minutes/24h of receipt to prevent trace recovery." if (velocity_score > 0 or wash_ratio >= 80) else "Sequential settlement velocity observed."
                     },
                     "device_ip_attribution": {
                         "primary_device": primary_device or "Standard Client",
@@ -607,6 +632,10 @@ def get_suspicious_accounts(page: int = 1, limit: int = 50, search: Optional[str
                     "risk_factors": factors,
                     "primary_device": primary_device,
                     "primary_ip": primary_ip,
+                    "velocity_score": velocity_score,
+                    "struct_score": struct_score,
+                    "meta_score": meta_score,
+                    "temporal_score": temporal_score,
                     "threat_report": threat_report,
                 })
 
@@ -793,23 +822,46 @@ def trace_victim_network(victim_id: str) -> Dict[str, Any]:
                 "message": "Transactions database table is not ready.",
             }
 
-        match = conn.execute("SELECT sender FROM transactions WHERE sender = ? LIMIT 1", [clean_id]).fetchone()
+        # Verify account exists as sender or receiver
+        match = conn.execute("SELECT sender FROM transactions WHERE sender = ? OR receiver = ? LIMIT 1", [clean_id, clean_id]).fetchone()
         if not match:
-            case_match = conn.execute("SELECT sender FROM transactions WHERE UPPER(sender) = UPPER(?) LIMIT 1", [clean_id]).fetchone()
+            case_match = conn.execute("SELECT sender FROM transactions WHERE UPPER(sender) = UPPER(?) OR UPPER(receiver) = UPPER(?) LIMIT 1", [clean_id, clean_id]).fetchone()
             if case_match:
                 clean_id = case_match[0]
             else:
                 return {
                     "status": "error",
                     "error_code": "ACCOUNT_NOT_FOUND",
-                    "message": f"Account '{clean_id}' was not found as a sender in the transactions database.",
+                    "message": f"Account '{clean_id}' was not found in the transactions database.",
                 }
 
-        query = """
+        # 1. Fetch Inbound Transactions to Target Hub: "Source of Funds" (Hop -1)
+        inbound_query = """
+        SELECT 
+            TRIM(sender) AS source,
+            TRIM(receiver) AS target,
+            amount,
+            timestamp,
+            -1 AS hop,
+            -1 AS hop_level,
+            COALESCE(TRY_CAST(ip_address AS VARCHAR), '') AS ip_address,
+            COALESCE(TRY_CAST(device_type AS VARCHAR), '') AS device_type,
+            COALESCE(TRY_CAST(payment_mode AS VARCHAR), '') AS payment_mode,
+            COALESCE(TRY_CAST(narration AS VARCHAR), '') AS narration
+        FROM transactions
+        WHERE TRIM(UPPER(receiver)) = TRIM(UPPER(?))
+        ORDER BY amount DESC, timestamp DESC
+        LIMIT 50;
+        """
+        inbound_rows = conn.execute(inbound_query, [clean_id]).fetchall()
+
+        # 2. Recursive CTE for Outbound Transactions: Hops 1, 2, 3 with strict cycle prevention & partitioned layer allocation
+        outbound_query = """
         WITH RECURSIVE trace_network AS (
+            -- Anchor Member (Hop 1: direct outflows from target hub)
             SELECT 
-                sender AS source,
-                receiver AS target,
+                TRIM(sender) AS source,
+                TRIM(receiver) AS target,
                 amount,
                 timestamp,
                 COALESCE(TRY_CAST(ip_address AS VARCHAR), '') AS ip_address,
@@ -817,15 +869,17 @@ def trace_victim_network(victim_id: str) -> Dict[str, Any]:
                 COALESCE(TRY_CAST(payment_mode AS VARCHAR), '') AS payment_mode,
                 COALESCE(TRY_CAST(narration AS VARCHAR), '') AS narration,
                 1 AS hop,
-                [sender, receiver] AS path
+                1 AS hop_level,
+                [TRIM(UPPER(sender)), TRIM(UPPER(receiver))] AS path
             FROM transactions
-            WHERE sender = ?
+            WHERE TRIM(UPPER(sender)) = TRIM(UPPER(?))
 
             UNION ALL
 
+            -- Recursive Member (Hop 2 and 3)
             SELECT 
-                t.sender AS source,
-                t.receiver AS target,
+                TRIM(t.sender) AS source,
+                TRIM(t.receiver) AS target,
                 t.amount,
                 t.timestamp,
                 COALESCE(TRY_CAST(t.ip_address AS VARCHAR), '') AS ip_address,
@@ -833,85 +887,132 @@ def trace_victim_network(victim_id: str) -> Dict[str, Any]:
                 COALESCE(TRY_CAST(t.payment_mode AS VARCHAR), '') AS payment_mode,
                 COALESCE(TRY_CAST(t.narration AS VARCHAR), '') AS narration,
                 tn.hop + 1 AS hop,
-                list_append(tn.path, t.receiver) AS path
+                tn.hop_level + 1 AS hop_level,
+                list_append(tn.path, TRIM(UPPER(t.receiver))) AS path
             FROM transactions t
-            JOIN trace_network tn ON t.sender = tn.target
+            JOIN trace_network tn ON TRIM(UPPER(t.sender)) = TRIM(UPPER(tn.target))
             WHERE tn.hop < 3
-              AND NOT list_contains(tn.path, t.receiver)
+              AND NOT list_contains(tn.path, TRIM(UPPER(t.receiver)))
+              AND TRIM(UPPER(t.receiver)) != TRIM(UPPER(?))
+        ),
+        ranked_trace AS (
+            SELECT *,
+                ROW_NUMBER() OVER(PARTITION BY hop ORDER BY amount DESC, timestamp ASC) as rk
+            FROM trace_network
         )
-        SELECT source, target, amount, timestamp, hop, ip_address, device_type, payment_mode, narration 
-        FROM trace_network 
-        ORDER BY hop ASC, timestamp ASC;
+        SELECT source, target, amount, timestamp, hop, hop_level, ip_address, device_type, payment_mode, narration 
+        FROM ranked_trace 
+        WHERE rk <= 100
+        ORDER BY hop ASC, amount DESC;
         """
+        outbound_rows = conn.execute(outbound_query, [clean_id, clean_id]).fetchall()
 
-        rows = conn.execute(query, [clean_id]).fetchall()
-
-        if not rows:
+        if not inbound_rows and not outbound_rows:
             return {
                 "status": "success",
                 "victim_id": clean_id,
                 "nodes": [{"id": clean_id, "group": 0}],
                 "links": [],
-                "layer_summary": {"victim": 1, "layer_1": 0, "layer_2": 0, "layer_3": 0},
+                "layer_summary": {"source_of_funds": 0, "victim": 1, "layer_1": 0, "layer_2": 0, "layer_3": 0},
                 "total_nodes": 1,
                 "total_links": 0,
                 "total_volume": 0.0,
-                "message": f"No outbound transaction trails found originating from '{clean_id}'.",
+                "message": f"No transaction trails found for '{clean_id}'.",
             }
 
         node_groups: Dict[str, int] = {clean_id: 0}
         links: List[Dict[str, Any]] = []
         total_volume = 0.0
+        seen_edge_keys = set()
 
-        for r in rows:
-            src, tgt, amt, ts, hop = r[0], r[1], r[2], r[3], r[4]
-            ip_val = str(r[5]) if len(r) > 5 and r[5] is not None else ""
-            device_val = str(r[6]) if len(r) > 6 and r[6] is not None else ""
-            mode_val = str(r[7]) if len(r) > 7 and r[7] is not None else ""
-            narration_val = str(r[8]) if len(r) > 8 and r[8] is not None else ""
-
+        # Process Inbound Links (Source of Funds: Hop -1)
+        for r in inbound_rows:
+            src, tgt, amt, ts = str(r[0]), str(r[1]), r[2], r[3]
+            hop = int(r[4])
+            hop_lvl = int(r[5]) if len(r) > 5 and r[5] is not None else hop
+            ip_val = str(r[6]) if len(r) > 6 and r[6] is not None else ""
+            device_val = str(r[7]) if len(r) > 7 and r[7] is not None else ""
+            mode_val = str(r[8]) if len(r) > 8 and r[8] is not None else ""
+            narration_val = str(r[9]) if len(r) > 9 and r[9] is not None else ""
             amount_val = float(amt) if amt is not None else 0.0
-            total_volume += amount_val
 
+            edge_key = f"{src}->{tgt}"
+            if edge_key in seen_edge_keys:
+                continue
+            seen_edge_keys.add(edge_key)
+
+            total_volume += amount_val
             links.append({
-                "source": str(src),
-                "target": str(tgt),
+                "source": src,
+                "target": tgt,
                 "amount": amount_val,
                 "timestamp": str(ts),
-                "hop": int(hop),
+                "hop": hop,
+                "hop_level": hop_lvl,
                 "ip_address": ip_val,
                 "device_type": device_val,
                 "payment_mode": mode_val,
                 "narration": narration_val,
+                "transaction_narration": narration_val,
             })
 
-            if tgt not in node_groups or hop < node_groups[tgt]:
-                node_groups[tgt] = int(hop)
+            if src != clean_id and src not in node_groups:
+                node_groups[src] = -1
 
-        # Ensure every layer 1 node is explicitly linked to clean_id (Victim)
-        l1_targets = {l["target"] for l in links if l.get("hop") == 1 and l.get("source") == clean_id}
-        for tgt_acc, group_idx in list(node_groups.items()):
-            if group_idx == 1 and tgt_acc not in l1_targets:
-                # Synthesize / ensure direct hop 1 link exists
-                earliest_ts = links[0]["timestamp"] if links else "2026-09-16 00:00:00"
-                links.insert(0, {
-                    "source": clean_id,
-                    "target": tgt_acc,
-                    "amount": 49500.0,
-                    "timestamp": earliest_ts,
-                    "hop": 1,
-                    "ip_address": "",
-                    "device_type": "",
-                    "payment_mode": "IMPS",
-                    "narration": "INITIAL_OUTFLOW/SOURCE_DISBURSEMENT",
-                })
-                l1_targets.add(tgt_acc)
+        # Process Outbound Links (Hops 1, 2, 3)
+        for r in outbound_rows:
+            src, tgt, amt, ts = str(r[0]), str(r[1]), r[2], r[3]
+            hop = int(r[4])
+            hop_lvl = int(r[5]) if len(r) > 5 and r[5] is not None else hop
+            ip_val = str(r[6]) if len(r) > 6 and r[6] is not None else ""
+            device_val = str(r[7]) if len(r) > 7 and r[7] is not None else ""
+            mode_val = str(r[8]) if len(r) > 8 and r[8] is not None else ""
+            narration_val = str(r[9]) if len(r) > 9 and r[9] is not None else ""
+            amount_val = float(amt) if amt is not None else 0.0
+
+            edge_key = f"{src}->{tgt}"
+            if edge_key in seen_edge_keys:
+                continue
+            seen_edge_keys.add(edge_key)
+
+            total_volume += amount_val
+            links.append({
+                "source": src,
+                "target": tgt,
+                "amount": amount_val,
+                "timestamp": str(ts),
+                "hop": hop,
+                "hop_level": hop_lvl,
+                "ip_address": ip_val,
+                "device_type": device_val,
+                "payment_mode": mode_val,
+                "narration": narration_val,
+                "transaction_narration": narration_val,
+            })
+
+            if tgt not in node_groups or (node_groups[tgt] != 0 and hop < node_groups[tgt]):
+                if tgt != clean_id:
+                    node_groups[tgt] = hop
+
+        # STRICT PAYLOAD LIMIT: Cap total nodes to maximum 300 to prevent browser crashes
+        MAX_NODES = 300
+        if len(node_groups) > MAX_NODES:
+            retained_ids = set()
+            # Prioritize: 0 (Target Hub), -1 (Source of Funds), 1 (Primary Mules), 2, 3
+            for priority_grp in [0, -1, 1, 2, 3]:
+                for n_id, grp in node_groups.items():
+                    if grp == priority_grp and len(retained_ids) < MAX_NODES:
+                        retained_ids.add(n_id)
+            node_groups = {k: v for k, v in node_groups.items() if k in retained_ids}
+            links = [l for l in links if l["source"] in retained_ids and l["target"] in retained_ids]
 
         nodes = [{"id": node_id, "group": group} for node_id, group in node_groups.items()]
+        # Sort order: Source of Funds (-1) first, then Target Hub (0), then Hop 1, 2, 3
         nodes.sort(key=lambda n: (n["group"], n["id"]))
 
         layer_summary = {
-            "victim": 1,
+            "source_of_funds": sum(1 for n in nodes if n["group"] == -1),
+            "victim": sum(1 for n in nodes if n["group"] == 0),
             "layer_1": sum(1 for n in nodes if n["group"] == 1),
             "layer_2": sum(1 for n in nodes if n["group"] == 2),
             "layer_3": sum(1 for n in nodes if n["group"] == 3),

@@ -16,8 +16,10 @@ import {
 } from '@xyflow/react'
 import type { Node, Edge, NodeProps, EdgeProps } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import dagre from '@dagrejs/dagre'
+import ELK from 'elkjs/lib/elk.bundled.js'
 import { jsPDF } from 'jspdf'
+
+const elk = new ELK()
 
 import {
   Play,
@@ -29,8 +31,9 @@ import {
   Check,
   Gauge,
   Layers,
-  Maximize2,
+  Maximize,
   Minimize2,
+  Monitor,
   X,
   Smartphone,
   Globe,
@@ -42,9 +45,15 @@ import {
   FolderPlus,
   FolderMinus,
   Shield,
+  ShieldAlert,
+  Bot,
   Download,
   RefreshCw,
   AlertTriangle,
+  Banknote,
+  Landmark,
+  Coins,
+  Users,
 } from 'lucide-react'
 
 export interface GraphNode {
@@ -58,10 +67,12 @@ export interface GraphLink {
   amount: number
   timestamp: string
   hop: number
+  hop_level?: number
   ip_address?: string
   device_type?: string
   payment_mode?: string
   narration?: string
+  transaction_narration?: string
 }
 
 export interface NetworkGraphProps {
@@ -70,6 +81,7 @@ export interface NetworkGraphProps {
   victimId?: string
   totalVolume?: number
   onNodeClick?: (node: GraphNode) => void
+  onAskAI?: (accountId: string) => void
 }
 
 // Strict ID normalizer: strips leading/trailing whitespace and resolves object references
@@ -123,61 +135,84 @@ interface LayerStyle {
   dotColor: string
   edgeColor: string
   label: string
+  badgeLabel: string
 }
 
 const LAYER_STYLES: Record<number, LayerStyle> = {
-  0: {
-    border: 'border-emerald-500',
+  [-1]: {
+    border: 'border-emerald-400 hover:border-emerald-500',
     bg: 'bg-white',
     headerBg: 'bg-emerald-50 border-b border-emerald-100',
     headerText: 'text-emerald-900',
     badgeText: 'bg-emerald-100 text-emerald-800 border-emerald-200',
     dotColor: '#10b981',
-    edgeColor: '#10b981',
-    label: 'Source of Funds (Hop 0)',
+    edgeColor: '#059669',
+    label: 'SOURCE OF FUNDS',
+    badgeLabel: 'FEEDER',
+  },
+  0: {
+    border: 'border-rose-400 hover:border-rose-500 ring-2 ring-rose-500/20',
+    bg: 'bg-white',
+    headerBg: 'bg-rose-50 border-b border-rose-100',
+    headerText: 'text-rose-900',
+    badgeText: 'bg-rose-100 text-rose-800 border-rose-200 font-bold',
+    dotColor: '#f43f5e',
+    edgeColor: '#f43f5e',
+    label: 'TARGET HUB (SUSPECT)',
+    badgeLabel: 'SUSPECT',
   },
   1: {
-    border: 'border-indigo-500',
+    border: 'border-indigo-400 hover:border-indigo-500',
     bg: 'bg-white',
     headerBg: 'bg-indigo-50 border-b border-indigo-100',
     headerText: 'text-indigo-900',
     badgeText: 'bg-indigo-100 text-indigo-800 border-indigo-200',
     dotColor: '#6366f1',
     edgeColor: '#4f46e5',
-    label: 'Layer 1: Primary Mule',
+    label: 'LAYER 1 MULE',
+    badgeLabel: 'HOP 1',
   },
   2: {
-    border: 'border-amber-500',
+    border: 'border-amber-400 hover:border-amber-500',
     bg: 'bg-white',
     headerBg: 'bg-amber-50 border-b border-amber-100',
     headerText: 'text-amber-900',
     badgeText: 'bg-amber-100 text-amber-800 border-amber-200',
     dotColor: '#f59e0b',
     edgeColor: '#d97706',
-    label: 'Layer 2: Distributor / Smurf',
+    label: 'LAYER 2 DISTRIBUTOR',
+    badgeLabel: 'HOP 2',
   },
   3: {
-    border: 'border-rose-500',
+    border: 'border-rose-400 hover:border-rose-500',
     bg: 'bg-white',
     headerBg: 'bg-rose-50 border-b border-rose-100',
     headerText: 'text-rose-900',
-    badgeText: 'bg-rose-100 text-rose-800 border-rose-200',
+    badgeText: 'bg-rose-100 text-rose-800 border-rose-200 font-bold',
     dotColor: '#ef4444',
     edgeColor: '#e11d48',
-    label: 'Layer 3: Terminal / Cashout Hub',
+    label: 'LAYER 3 TERMINAL',
+    badgeLabel: 'HOP 3',
   },
 }
 
-// --- CUSTOM NODE: CRISP WHITE CARD WITH INTERACTIVE EXPAND/COLLAPSE & SEC 91 ACTION ---
+// --- CUSTOM NODE: CRISP WHITE CARD WITH INTERACTIVE EXPAND/COLLAPSE & SIDE PANEL INSPECTION ---
 interface AccountNodeData {
   id: string
   group: number
   bankName: string
+  flowAmount: number
+  narration?: string
   childCount?: number
   isExpanded?: boolean
+  isCashOut?: boolean
+  cashOutType?: string
+  cashOutIcon?: 'crypto' | 'atm' | 'forex' | 'cash' | 'terminal'
+  inboundTotal?: number
+  outboundTotal?: number
+  retainedBalance?: number
   onNodeInteraction?: (id: string, group: number, event: React.MouseEvent) => void
   onToggleExpand?: (id: string) => void
-  onDraftNotice?: (id: string, bankName: string) => void
 }
 
 function AccountCardNode({ data, selected }: NodeProps) {
@@ -198,21 +233,38 @@ function AccountCardNode({ data, selected }: NodeProps) {
   const childCount = nodeData?.childCount || 0
   const isExpanded = !!nodeData?.isExpanded
   const hasChildren = childCount > 0
-  const isLayer3 = group === 3
+  const isCashOut = !!nodeData?.isCashOut
+
+  // Dynamic icon for terminal cashout exit categories
+  const CashIcon =
+    nodeData.cashOutIcon === 'crypto' ? (
+      <Coins className="h-3 w-3 text-amber-500 shrink-0" />
+    ) : nodeData.cashOutIcon === 'atm' ? (
+      <Banknote className="h-3 w-3 text-emerald-500 shrink-0" />
+    ) : nodeData.cashOutIcon === 'forex' ? (
+      <Globe className="h-3 w-3 text-sky-500 shrink-0" />
+    ) : nodeData.cashOutIcon === 'cash' ? (
+      <Banknote className="h-3 w-3 text-rose-500 shrink-0" />
+    ) : (
+      <Landmark className="h-3 w-3 text-rose-500 shrink-0" />
+    )
+
+  const formattedAmount = `₹${(nodeData.flowAmount || 0).toLocaleString('en-IN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`
 
   return (
     <div
       onClick={(e) => {
-        if (isLayer3 && nodeData?.onDraftNotice) {
-          nodeData.onDraftNotice(nodeData.id, nodeData.bankName)
-        } else if (nodeData?.onNodeInteraction) {
+        if (nodeData?.onNodeInteraction) {
           nodeData.onNodeInteraction(nodeData.id, group, e)
         }
       }}
-      className={`forensic-node-enter relative rounded-xl border-2 transition-all duration-200 select-none cursor-pointer bg-white shadow-md hover:shadow-xl ${
-        style.border
+      className={`forensic-node-enter relative rounded-xl border-2 transition-all duration-200 select-none cursor-pointer bg-white text-slate-800 shadow-sm hover:shadow-md ${
+        isCashOut ? 'border-rose-400 hover:border-rose-500 ring-1 ring-rose-400/40' : style.border
       } ${selected ? 'ring-2 ring-indigo-500 ring-offset-2 scale-102 shadow-indigo-500/20' : 'hover:scale-[1.01]'}`}
-      style={{ width: 240, height: isLayer3 ? 104 : 92 }}
+      style={{ width: 260, minHeight: 124 }}
     >
       {/* Target handle on LEFT edge for incoming money flow */}
       <Handle
@@ -221,64 +273,93 @@ function AccountCardNode({ data, selected }: NodeProps) {
         className="!w-2.5 !h-2.5 !bg-indigo-600 !border-2 !border-white !rounded-full -ml-1.5 shadow-xs transition-transform hover:scale-125"
       />
 
-      {/* Top Header Strip with Tier Badge */}
-      <div className={`px-2.5 py-1 flex items-center justify-between rounded-t-[10px] ${style.headerBg}`}>
-        <div className="flex items-center gap-1.5">
+      {/* Top Header Strip with Tier Badge (Crisp pastel background) */}
+      <div
+        className={`px-2.5 py-1 flex items-center justify-between rounded-t-[10px] ${
+          isCashOut ? 'bg-rose-50 border-b border-rose-100 text-rose-900' : style.headerBg
+        }`}
+      >
+        <div className="flex items-center gap-1.5 overflow-hidden">
           <span
             className="h-2 w-2 rounded-full shrink-0 animate-pulse"
-            style={{ backgroundColor: style.dotColor }}
+            style={{ backgroundColor: isCashOut ? '#ef4444' : style.dotColor }}
           />
-          <span className={`text-[10px] font-mono font-bold tracking-tight uppercase ${style.headerText}`}>
-            {group === 0 ? 'Victim' : isLayer3 ? 'Layer 3 Terminal' : `Layer ${group}`}
-          </span>
+          <div className="flex items-center gap-1 text-[10px] font-mono font-bold tracking-tight uppercase truncate">
+            {isCashOut ? (
+              <>
+                {CashIcon}
+                <span className="truncate">{nodeData.cashOutType || 'TERMINAL EXIT'}</span>
+              </>
+            ) : (
+              <span className={`truncate ${style.headerText}`}>
+                {group === -1
+                  ? 'SOURCE OF FUNDS'
+                  : group === 0
+                  ? 'TARGET HUB (SUSPECT)'
+                  : style.label}
+              </span>
+            )}
+          </div>
         </div>
-        <span className={`text-[9px] font-mono font-semibold px-1.5 py-0.2 rounded border ${style.badgeText}`}>
-          {group === 0 ? 'SOURCE' : `HOP ${group}`}
+        <span
+          className={`text-[9px] font-mono font-bold px-1.5 py-0.2 rounded border shrink-0 ${
+            isCashOut ? 'bg-rose-100 text-rose-800 border-rose-200' : style.badgeText
+          }`}
+        >
+          {isCashOut ? 'TERMINAL' : style.badgeLabel}
         </span>
       </div>
 
-      {/* Card Body: Crisp White Card Content */}
-      <div className={`p-2.5 flex flex-col justify-between ${isLayer3 ? 'h-[72px]' : 'h-[60px]'} bg-white rounded-b-[10px]`}>
-        {/* Account ID + Copy Action */}
+      {/* Card Body: flex-col gap-1.5 for clean line-by-line layout */}
+      <div className="px-2.5 py-2 flex flex-col gap-1 bg-white rounded-b-[10px]">
+        {/* Line 1: Account ID + Copy Action */}
         <div className="flex items-center justify-between">
-          <span className="font-mono text-xs font-black tracking-tight text-slate-900 truncate max-w-[170px]" title={nodeData.id}>
+          <span className="font-mono text-xs font-black tracking-tight text-slate-900 truncate max-w-[190px]" title={nodeData.id}>
             {nodeData.id}
           </span>
           <button
             type="button"
             onClick={handleCopy}
-            className="p-1 rounded text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer"
+            className="p-0.5 rounded text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer shrink-0"
             title="Copy Account ID"
           >
             {copied ? <Check className="h-3 w-3 text-emerald-600" /> : <Copy className="h-3 w-3" />}
           </button>
         </div>
 
-        {/* Bank Institution Name */}
-        <div className="flex items-center gap-1 text-[11px] text-slate-600 truncate font-sans">
-          <Building className="h-3 w-3 text-slate-400 shrink-0" />
+        {/* Line 2: Bank Institution Name */}
+        <div className="flex items-center gap-1 text-[10px] text-slate-500 font-sans">
+          <Building className="h-2.5 w-2.5 text-slate-400 shrink-0" />
           <span className="truncate" title={nodeData.bankName}>
             {nodeData.bankName}
           </span>
         </div>
 
-        {/* Dedicated Section 91 Notice Button for Layer 3 Terminal Nodes */}
-        {isLayer3 && (
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation()
-              if (nodeData?.onDraftNotice) {
-                nodeData.onDraftNotice(nodeData.id, nodeData.bankName)
-              }
-            }}
-            className="mt-1 flex items-center justify-center gap-1 w-full py-0.5 px-2 rounded-md bg-rose-600 hover:bg-rose-700 text-white font-sans text-[9px] font-bold shadow-xs active:scale-95 transition cursor-pointer"
-            title="Draft Autonomous Section 91 CrPC Freezing Order"
-          >
-            <Shield className="h-2.5 w-2.5" />
-            <span>Draft Sec 91 Notice</span>
-          </button>
-        )}
+        {/* Line 3: Flow Amount in INR with direction-coded color */}
+        <div className="flex items-center justify-between text-[11px] font-mono border-t border-slate-100 pt-1">
+          <span className="text-slate-400 text-[9px] font-medium">
+            {group === -1 ? 'In:' : group === 0 ? 'Vol:' : 'Out:'}
+          </span>
+          <span className={`font-extrabold ${
+            group === -1
+              ? 'text-emerald-600'
+              : group === 0
+              ? 'text-rose-700'
+              : isCashOut
+              ? 'text-rose-600'
+              : 'text-indigo-700'
+          }`}>
+            {formattedAmount}
+          </span>
+        </div>
+
+        {/* Line 4: Narration with line-clamp-1 to prevent overflow */}
+        <div className="flex items-center gap-1 text-[9px] text-slate-400 font-sans">
+          <FileText className="h-2.5 w-2.5 text-slate-300 shrink-0" />
+          <span className="truncate" title={nodeData.narration || 'Forensic Transfer Relay'}>
+            {nodeData.narration || 'Forensic Transfer Relay'}
+          </span>
+        </div>
       </div>
 
       {/* Source handle on RIGHT edge for outgoing money flow */}
@@ -288,7 +369,7 @@ function AccountCardNode({ data, selected }: NodeProps) {
         className="!w-2.5 !h-2.5 !bg-indigo-600 !border-2 !border-white !rounded-full -mr-1.5 shadow-xs transition-transform hover:scale-125"
       />
 
-      {/* Interactive Expand / Collapse Toggle Pill on Right Edge */}
+      {/* Interactive Expand / Collapse Toggle Pill */}
       {hasChildren && (
         <button
           type="button"
@@ -330,6 +411,7 @@ interface MoneyFlowEdgeData {
   device_type?: string
   payment_mode?: string
   narration?: string
+  transaction_narration?: string
   sourceId: string
   targetId: string
   onEdgeClick?: (data: MoneyFlowEdgeData, event: React.MouseEvent) => void
@@ -362,11 +444,13 @@ function MoneyFlowEdge({
     curvature,
   })
 
-  const formattedAmt = edgeData?.formattedAmount || '$0.00'
+  const formattedAmt = edgeData?.formattedAmount || '₹0.00'
   const timestamp = edgeData?.timestamp || ''
 
   const hopColor =
-    edgeData?.hop === 1
+    edgeData?.hop === -1
+      ? 'border-emerald-200 text-emerald-700 bg-emerald-50'
+      : edgeData?.hop === 1
       ? 'border-indigo-200 text-indigo-700 bg-indigo-50'
       : edgeData?.hop === 2
       ? 'border-amber-200 text-amber-700 bg-amber-50'
@@ -406,7 +490,7 @@ function MoneyFlowEdge({
               {formattedAmt}
             </span>
             <span className={`text-[8px] font-mono font-bold px-1 py-0.2 rounded border ${hopColor}`}>
-              H{edgeData?.hop || 1}
+              {edgeData?.hop === -1 ? 'SRC' : `H${edgeData?.hop || 1}`}
             </span>
           </div>
           {timestamp && (
@@ -441,6 +525,28 @@ interface NoticeTarget {
   accountId: string
   bankName: string
   amount: number
+  isBulk?: boolean
+  connectedAccounts?: string[]
+}
+
+// Phase 5: Deep Forensic Node Detail State
+interface SelectedNodeDetail {
+  id: string
+  group: number
+  bankName: string
+  flowAmount: number
+  inboundTotal: number
+  outboundTotal: number
+  retainedBalance: number
+  inboundCount: number
+  outboundCount: number
+  inboundLinks: GraphLink[]
+  outboundLinks: GraphLink[]
+  narration: string
+  ipAddress?: string
+  deviceType?: string
+  paymentMode?: string
+  downstreamAccounts: string[]
 }
 
 function NetworkGraphInner({
@@ -449,6 +555,7 @@ function NetworkGraphInner({
   victimId: _victimId,
   totalVolume: _totalVolume,
   onNodeClick: _onNodeClick,
+  onAskAI,
 }: NetworkGraphProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [isFullscreen, setIsFullscreen] = useState(false)
@@ -474,6 +581,11 @@ function NetworkGraphInner({
   const [isLoadingNotice, setIsLoadingNotice] = useState(false)
   const [noticeError, setNoticeError] = useState<string | null>(null)
   const [copiedNotice, setCopiedNotice] = useState(false)
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null)
+  const [highlightedPathNodeId, setHighlightedPathNodeId] = useState<string | null>(null)
+
+  // Phase 5: Slide-in Node Detail Side Panel State
+  const [selectedNodeDetail, setSelectedNodeDetail] = useState<SelectedNodeDetail | null>(null)
 
   // React Flow instance hooks
   const { fitView, setCenter } = useReactFlow()
@@ -514,21 +626,26 @@ function NetworkGraphInner({
 
   const rootId = rootNode ? cleanId(rootNode.id) : cleanVictimId
 
-  // --- INTERACTIVE COLLAPSIBLE TREE STATE ---
-  // Initial state: Only Victim (Hop 0) and Layer 1 nodes are expanded. Layer 2 and 3 nodes are collapsed by default!
+  // --- AUTO-EXPAND ON MOUNT: ALL LAYERS (1, 2, 3) EXPANDED IMMEDIATELY ---
   const [expandedNodeIds, setExpandedNodeIds] = useState<Set<string>>(() => {
-    const initial = new Set<string>()
-    if (rootId) initial.add(rootId)
-    return initial
+    const allIds = new Set<string>()
+    normalizedLinks.forEach((l) => allIds.add(cleanId(l.source)))
+    normalizedNodes.forEach((n) => allIds.add(cleanId(n.id)))
+    if (rootId) allIds.add(rootId)
+    return allIds
   })
 
-  // Reset expanded state whenever new victim dataset is loaded
+  // Re-expand all nodes whenever new dataset is loaded
   useEffect(() => {
-    const initial = new Set<string>()
-    if (rootId) initial.add(rootId)
-    setExpandedNodeIds(initial)
+    const allIds = new Set<string>()
+    normalizedLinks.forEach((l) => allIds.add(cleanId(l.source)))
+    normalizedNodes.forEach((n) => allIds.add(cleanId(n.id)))
+    if (rootId) allIds.add(rootId)
+    setExpandedNodeIds(allIds)
+    setHighlightedPathNodeId(null)
+    setSelectedNodeDetail(null)
     isInitialFitDoneRef.current = false
-  }, [rootId])
+  }, [rootId, normalizedLinks, normalizedNodes])
 
   // Build parent-to-child and incoming links lookup maps with clean IDs
   const { childMap, incomingLinksByTarget } = useMemo(() => {
@@ -703,7 +820,20 @@ function NetworkGraphInner({
     setAutoplayCount(null)
     setTooltip(null)
     setPopupPos(null)
+    setHighlightedPathNodeId(null)
   }, [timeMetrics.min, timeMetrics.max])
+
+  // Explicit unmount cleanup for garbage collection and memory leak prevention
+  useEffect(() => {
+    return () => {
+      setTooltip(null)
+      setPopupPos(null)
+      setHoveredNodeId(null)
+      setHighlightedPathNodeId(null)
+      setIsNoticeDrawerOpen(false)
+      setActiveNoticeTarget(null)
+    }
+  }, [])
 
   // Variable speed mapping in milliseconds:
   const autoplayIntervalMs = useMemo(() => {
@@ -770,7 +900,25 @@ function NetworkGraphInner({
     const visibleNodeIds = new Set<string>()
     if (rootId) visibleNodeIds.add(rootId)
 
+    // Always include Hop -1 (Source of Funds) nodes that feed into the target hub
+    normalizedNodes.forEach((n) => {
+      if (n.group === -1) {
+        visibleNodeIds.add(cleanId(n.id))
+      }
+    })
+
     const finalLinksMap = new Map<string, GraphLink>()
+
+    // Always include Hop -1 inbound links
+    normalizedLinks.forEach((l) => {
+      if (l.hop === -1) {
+        const s = cleanId(l.source)
+        const t = cleanId(l.target)
+        if (s && t) {
+          finalLinksMap.set(`${s}->${t}`, l)
+        }
+      }
+    })
 
     if (autoplayCount !== null && autoplayCount > 0) {
       // Mode A: Autoplay step-by-step chronological animation
@@ -806,6 +954,7 @@ function NetworkGraphInner({
 
       // Step B2: Collect candidate links between visible nodes where parent is expanded
       const candidateLinks = normalizedLinks.filter((l) => {
+        if (l.hop === -1) return true
         const s = cleanId(l.source)
         const t = cleanId(l.target)
         return visibleNodeIds.has(s) && visibleNodeIds.has(t) && expandedNodeIds.has(s)
@@ -819,7 +968,7 @@ function NetworkGraphInner({
       } else {
         candidateLinks.forEach((l) => {
           const t = parseTimestamp(l.timestamp)
-          if (t === null || t <= sliderTime) {
+          if (l.hop === -1 || t === null || t <= sliderTime) {
             finalLinksMap.set(`${cleanId(l.source)}->${cleanId(l.target)}`, l)
           }
         })
@@ -827,15 +976,19 @@ function NetworkGraphInner({
     }
 
     // STRICT RULES 1 & 2 ENFORCEMENT:
-    // For every visible node (other than root), its incoming parent edge MUST be forced visible,
+    // For every visible node (other than root and Hop -1 source nodes), its incoming parent edge MUST be forced visible,
     // and its parent node MUST be added to visibleNodeIds, regardless of timestamp discrepancies!
+    const sourceNodeIdSet = new Set(
+      normalizedNodes.filter((n) => n.group === -1).map((n) => cleanId(n.id))
+    )
+
     let changed = true
     while (changed) {
       changed = false
       const currentNodes = Array.from(visibleNodeIds)
 
       for (const targetId of currentNodes) {
-        if (targetId === rootId) continue
+        if (targetId === rootId || sourceNodeIdSet.has(targetId)) continue
 
         let hasIncoming = false
         for (const l of finalLinksMap.values()) {
@@ -907,9 +1060,56 @@ function NetworkGraphInner({
     })
   }, [sliderTime, timeMetrics.hasTimes])
 
+  // Retained balance for Target Hub (Inbound - Outbound)
+  const targetRetainedBalance = useMemo(() => {
+    if (!rootId) return null
+    const cleanR = cleanId(rootId)
+    const inSum = normalizedLinks
+      .filter((l) => cleanId(l.target) === cleanR)
+      .reduce((a, c) => a + (Number(c.amount) || 0), 0)
+    const outSum = normalizedLinks
+      .filter((l) => cleanId(l.source) === cleanR)
+      .reduce((a, c) => a + (Number(c.amount) || 0), 0)
+    return Math.round((inSum - outSum) * 100) / 100
+  }, [rootId, normalizedLinks])
+
+  // --- BFS TRAVERSAL ENGINE TO COLLECT ALL DOWNSTREAM DESCENDANTS ---
+  const getDownstreamDescendants = useCallback(
+    (startId: string): string[] => {
+      const cleanStart = cleanId(startId)
+      const descendants: string[] = []
+      const queue: string[] = [cleanStart]
+      const visited = new Set<string>([cleanStart])
+
+      while (queue.length > 0) {
+        const curr = queue.shift()!
+        const children = childMap[curr]
+        if (children) {
+          children.forEach((childId) => {
+            const cleanChild = cleanId(childId)
+            if (!visited.has(cleanChild)) {
+              visited.add(cleanChild)
+              descendants.push(cleanChild)
+              queue.push(cleanChild)
+            }
+          })
+        }
+      }
+
+      return descendants
+    },
+    [childMap]
+  )
+
   // --- PHASE 4: TRIGGER SECTION 91 NOTICE GENERATION & OPEN DRAWER ---
   const handleDraftNotice = useCallback(
-    async (accountId: string, bankName: string) => {
+    async (
+      accountId: string,
+      bankName: string,
+      connectedAccounts?: string[],
+      isBulk?: boolean,
+      overrideAmount?: number
+    ) => {
       const cleanTarget = cleanId(accountId)
       if (!cleanTarget) return
 
@@ -917,7 +1117,7 @@ function NetworkGraphInner({
       const totalIn = inbound.reduce((acc, curr) => acc + (Number(curr.amount) || 0), 0)
       const outbound = normalizedLinks.filter((l) => cleanId(l.source) === cleanTarget)
       const totalOut = outbound.reduce((acc, curr) => acc + (Number(curr.amount) || 0), 0)
-      const targetAmt = totalIn > 0 ? totalIn : totalOut > 0 ? totalOut : 50000
+      const targetAmt = overrideAmount || (totalIn > 0 ? totalIn : totalOut > 0 ? totalOut : 50000)
 
       const targetBank = bankName || getBankName(cleanTarget)
 
@@ -925,6 +1125,8 @@ function NetworkGraphInner({
         accountId: cleanTarget,
         bankName: targetBank,
         amount: targetAmt,
+        isBulk: !!isBulk,
+        connectedAccounts,
       })
 
       setIsNoticeDrawerOpen(true)
@@ -941,6 +1143,8 @@ function NetworkGraphInner({
             account_id: cleanTarget,
             bank_name: targetBank,
             amount: targetAmt,
+            connected_accounts: connectedAccounts && connectedAccounts.length > 0 ? connectedAccounts : undefined,
+            is_bulk: !!isBulk,
           }),
         })
 
@@ -1002,7 +1206,9 @@ function NetworkGraphInner({
       cursorY += lineHeight
     }
 
-    const fileName = `Sec91_Notice_${cleanId(activeNoticeTarget.accountId)}.pdf`
+    const fileName = activeNoticeTarget.isBulk
+      ? `Sec91_BulkNotice_${cleanId(activeNoticeTarget.accountId)}.pdf`
+      : `Sec91_Notice_${cleanId(activeNoticeTarget.accountId)}.pdf`
     doc.save(fileName)
   }
 
@@ -1014,48 +1220,64 @@ function NetworkGraphInner({
     setTimeout(() => setCopiedNotice(false), 2000)
   }
 
-  // Node Click interaction handler
-  const handleNodeInteraction = useCallback(
-    (nodeId: string, group: number, e: React.MouseEvent) => {
+  // Node path selection handler (triggers root-to-leaf path tracing)
+  const handleNodePathClick = useCallback(
+    (nodeId: string) => {
       const cleanTarget = cleanId(nodeId)
-      const containerRect = containerRef.current?.getBoundingClientRect()
-      if (!containerRect) return
-
-      let x = e.clientX - containerRect.left + 15
-      let y = e.clientY - containerRect.top + 15
-
-      const cardWidth = 320
-      const cardHeight = 310
-
-      if (x + cardWidth > containerRect.width) {
-        x = Math.max(10, e.clientX - containerRect.left - cardWidth - 15)
+      setHighlightedPathNodeId(cleanTarget)
+      if (_onNodeClick) {
+        const rawNode = normalizedNodes.find((n) => cleanId(n.id) === cleanTarget)
+        if (rawNode) _onNodeClick(rawNode)
       }
-      if (y + cardHeight > containerRect.height) {
-        y = Math.max(10, e.clientY - containerRect.top - cardHeight - 15)
-      }
+    },
+    [normalizedNodes, _onNodeClick]
+  )
+
+  // Node Click interaction handler: slides in the Node Detail Side Panel without auto-triggering notice drafting
+  const handleNodeInteraction = useCallback(
+    (nodeId: string, group: number, _e: React.MouseEvent) => {
+      const cleanTarget = cleanId(nodeId)
+      handleNodePathClick(cleanTarget)
 
       const inbound = normalizedLinks.filter((l) => cleanId(l.target) === cleanTarget)
       const outbound = normalizedLinks.filter((l) => cleanId(l.source) === cleanTarget)
       const totalIn = inbound.reduce((acc, curr) => acc + (Number(curr.amount) || 0), 0)
       const totalOut = outbound.reduce((acc, curr) => acc + (Number(curr.amount) || 0), 0)
+      const retained = Math.round((totalIn - totalOut) * 100) / 100
+      const flowAmount = totalIn > 0 ? totalIn : totalOut > 0 ? totalOut : 0
+      const sampleNarration =
+        inbound[0]?.transaction_narration ||
+        inbound[0]?.narration ||
+        outbound[0]?.transaction_narration ||
+        outbound[0]?.narration ||
+        ''
 
-      setTooltip({
-        type: 'node',
-        data: {
-          id: cleanTarget,
-          group,
-          bankName: getBankName(cleanTarget),
-          inboundCount: inbound.length,
-          outboundCount: outbound.length,
-          totalIn,
-          totalOut,
-          sampleIp: inbound[0]?.ip_address || outbound[0]?.ip_address,
-          sampleDevice: inbound[0]?.device_type || outbound[0]?.device_type,
-        },
+      const downstream = getDownstreamDescendants(cleanTarget)
+
+      setSelectedNodeDetail({
+        id: cleanTarget,
+        group,
+        bankName: getBankName(cleanTarget),
+        flowAmount,
+        inboundTotal: totalIn,
+        outboundTotal: totalOut,
+        retainedBalance: retained,
+        inboundCount: inbound.length,
+        outboundCount: outbound.length,
+        inboundLinks: inbound,
+        outboundLinks: outbound,
+        narration: sampleNarration,
+        ipAddress: inbound[0]?.ip_address || outbound[0]?.ip_address,
+        deviceType: inbound[0]?.device_type || outbound[0]?.device_type,
+        paymentMode: inbound[0]?.payment_mode || outbound[0]?.payment_mode,
+        downstreamAccounts: downstream,
       })
-      setPopupPos({ x, y })
+
+      // Close floating draggable popup if open to focus on the inspector drawer
+      setTooltip(null)
+      setPopupPos(null)
     },
-    [normalizedLinks]
+    [normalizedLinks, getDownstreamDescendants, handleNodePathClick]
   )
 
   // Edge Click interaction handler
@@ -1086,127 +1308,312 @@ function NetworkGraphInner({
     []
   )
 
-  // --- CRITICAL DAGRE LAYOUT ENGINE (DRYNAMIC SYMMETRICAL EXPANSION & ZERO OVERLAPS) ---
-  // Parameter settings strictly per prompt:
-  // ranksep: 420 (horizontal gap between ranks)
-  // nodesep: 150 (strict vertical blank gap between sibling card boundaries)
-  // align: 'c' (centers children evenly relative to their parent)
-  const CARD_WIDTH = 240
-  const CARD_HEIGHT_DEFAULT = 92
-  const CARD_HEIGHT_L3 = 104
+  // --- ROOT-TO-LEAF PATH TRACING & HOVER FOCUS ENGINE ---
+  const activeHighlight = useMemo(() => {
+    if (highlightedPathNodeId) {
+      const cleanSelected = cleanId(highlightedPathNodeId)
+      const pathNodeIds = new Set<string>([cleanSelected])
+      const pathEdgeIds = new Set<string>()
 
-  const { rfNodes, rfEdges, rootCenterX, rootCenterY } = useMemo(() => {
-    if (visibleNodes.length === 0) {
-      return { rfNodes: [], rfEdges: [], rootCenterX: 240, rootCenterY: 450 }
+      // 1. Backward traversal to Root Hub & Hop -1 Feeders
+      const backwardQueue = [cleanSelected]
+      const backwardVisited = new Set<string>([cleanSelected])
+
+      while (backwardQueue.length > 0) {
+        const curr = backwardQueue.shift()!
+        filteredLinks.forEach((link, idx) => {
+          const s = cleanId(link.source)
+          const t = cleanId(link.target)
+          if (t === curr) {
+            pathNodeIds.add(s)
+            pathEdgeIds.add(`e-${s}->${t}-${idx}`)
+            if (!backwardVisited.has(s)) {
+              backwardVisited.add(s)
+              backwardQueue.push(s)
+            }
+          }
+        })
+      }
+
+      // 2. Forward traversal to downstream leaves / terminal children
+      const forwardQueue = [cleanSelected]
+      const forwardVisited = new Set<string>([cleanSelected])
+
+      while (forwardQueue.length > 0) {
+        const curr = forwardQueue.shift()!
+        filteredLinks.forEach((link, idx) => {
+          const s = cleanId(link.source)
+          const t = cleanId(link.target)
+          if (s === curr) {
+            pathNodeIds.add(t)
+            pathEdgeIds.add(`e-${s}->${t}-${idx}`)
+            if (!forwardVisited.has(t)) {
+              forwardVisited.add(t)
+              forwardQueue.push(t)
+            }
+          }
+        })
+      }
+
+      return { pathNodeIds, pathEdgeIds }
     }
 
-    const g = new dagre.graphlib.Graph()
-    g.setDefaultEdgeLabel(() => ({}))
-    g.setGraph({
-      rankdir: 'LR',
-      nodesep: 150, // Massive vertical spacing between siblings: guarantees zero overlap!
-      ranksep: 420, // Wide horizontal spacing between hops for elegant bezier sweeps
-      align: 'c',   // Center alignment expands tree symmetrically
-      marginx: 50,
-      marginy: 50,
-    })
-
-    const visibleNodeIdSet = new Set(visibleNodes.map((n) => cleanId(n.id)))
-
-    // Register all visible nodes in Dagre graph with explicit widths and heights
-    visibleNodes.forEach((node) => {
-      const nId = cleanId(node.id)
-      const isL3 = node.group === 3
-      g.setNode(nId, {
-        width: CARD_WIDTH,
-        height: isL3 ? CARD_HEIGHT_L3 : CARD_HEIGHT_DEFAULT,
+    if (hoveredNodeId) {
+      const nodeIds = new Set<string>([hoveredNodeId])
+      const edgeIds = new Set<string>()
+      filteredLinks.forEach((link, idx) => {
+        const s = cleanId(link.source)
+        const t = cleanId(link.target)
+        if (s === hoveredNodeId || t === hoveredNodeId) {
+          nodeIds.add(s)
+          nodeIds.add(t)
+          edgeIds.add(`e-${s}->${t}-${idx}`)
+        }
       })
-    })
+      return { pathNodeIds: nodeIds, pathEdgeIds: edgeIds }
+    }
 
-    // Register all active edges in Dagre graph
-    filteredLinks.forEach((link) => {
-      const s = cleanId(link.source)
-      const t = cleanId(link.target)
-      if (s && t && visibleNodeIdSet.has(s) && visibleNodeIdSet.has(t)) {
-        g.setEdge(s, t)
+    return null
+  }, [highlightedPathNodeId, hoveredNodeId, filteredLinks])
+
+  // --- CRITICAL ELK LAYOUT ENGINE (ANTI-COLLISION LAYERED EXPANSION & ZERO OVERLAPS) ---
+  const CARD_WIDTH = 260
+  const CARD_HEIGHT = 112
+
+  const ANCHOR_X = 1100
+  const ANCHOR_Y = 400
+  const computedRootCenterX = ANCHOR_X + CARD_WIDTH / 2
+  const computedRootCenterY = ANCHOR_Y + CARD_HEIGHT / 2
+
+  const [layoutPositions, setLayoutPositions] = useState<Record<string, { x: number; y: number }>>({})
+  const prevLayoutKeyRef = useRef<string>('')
+
+  const layoutKey = useMemo(() => {
+    const nStr = visibleNodes.map((n) => cleanId(n.id)).sort().join(',')
+    const lStr = filteredLinks.map((l) => `${cleanId(l.source)}->${cleanId(l.target)}`).sort().join(',')
+    return `${nStr}#${lStr}`
+  }, [visibleNodes, filteredLinks])
+
+  useEffect(() => {
+    if (visibleNodes.length === 0) return
+    if (prevLayoutKeyRef.current === layoutKey) return
+    prevLayoutKeyRef.current = layoutKey
+
+    let isCancelled = false
+
+    const elkChildren = visibleNodes.map((n) => {
+      const nId = cleanId(n.id)
+      return {
+        id: nId,
+        width: CARD_WIDTH,
+        height: CARD_HEIGHT,
       }
     })
 
-    // Synchronously compute graph layout
-    dagre.layout(g)
+    const visibleIdSet = new Set(visibleNodes.map((n) => cleanId(n.id)))
+    const elkEdges = filteredLinks
+      .filter((l) => visibleIdSet.has(cleanId(l.source)) && visibleIdSet.has(cleanId(l.target)))
+      .map((l, idx) => ({
+        id: `e-${cleanId(l.source)}->${cleanId(l.target)}-${idx}`,
+        sources: [cleanId(l.source)],
+        targets: [cleanId(l.target)],
+      }))
 
-    // Invariant root anchoring: anchor root node at (120, 400)
-    const rootIdClean = cleanId(rootId)
-    const rootLayout = g.node(rootIdClean) || g.node(cleanId(visibleNodes[0].id))
-    const rootRawX = rootLayout ? rootLayout.x - CARD_WIDTH / 2 : 120
-    const rootRawY = rootLayout ? rootLayout.y - CARD_HEIGHT_DEFAULT / 2 : 400
+    const elkGraph = {
+      id: 'root',
+      layoutOptions: {
+        'elk.algorithm': 'layered',
+        'elk.direction': 'RIGHT',
+        'elk.spacing.nodeNode': '60',
+        'elk.layered.spacing.nodeNodeBetweenLayers': '340',
+        'elk.layered.nodePlacement.strategy': 'BRANDES_KOEPF',
+        'elk.alignment': 'CENTER',
+      },
+      children: elkChildren,
+      edges: elkEdges,
+    }
 
-    const ANCHOR_X = 120
-    const ANCHOR_Y = 400
+    elk
+      .layout(elkGraph)
+      .then((res) => {
+        if (isCancelled) return
+        const posMap: Record<string, { x: number; y: number }> = {}
+        const rootIdClean = cleanId(rootId)
+        const rootLayout = res.children?.find((c) => c.id === rootIdClean) || res.children?.[0]
+        const rootX = rootLayout?.x ?? 0
+        const rootY = rootLayout?.y ?? 0
 
-    const offsetX = ANCHOR_X - rootRawX
-    const offsetY = ANCHOR_Y - rootRawY
+        const offsetX = ANCHOR_X - rootX
+        const offsetY = ANCHOR_Y - rootY
 
-    const computedRootCenterX = ANCHOR_X + CARD_WIDTH / 2
-    const computedRootCenterY = ANCHOR_Y + CARD_HEIGHT_DEFAULT / 2
+        res.children?.forEach((child) => {
+          posMap[child.id] = {
+            x: (child.x ?? 0) + offsetX,
+            y: (child.y ?? 0) + offsetY,
+          }
+        })
+        setLayoutPositions(posMap)
+      })
+      .catch((err) => {
+        console.warn('ELK layout fallback:', err)
+        if (isCancelled) return
+        const fallbackMap: Record<string, { x: number; y: number }> = {}
+        const groupCounts: Record<number, number> = {}
+        visibleNodes.forEach((n) => {
+          const g = n.group
+          const count = groupCounts[g] || 0
+          groupCounts[g] = count + 1
+          const x = ANCHOR_X + (g === -1 ? -420 : g * 420)
+          const y = 300 + count * 150
+          fallbackMap[cleanId(n.id)] = { x, y }
+        })
+        setLayoutPositions(fallbackMap)
+      })
 
-    // Build React Flow nodes
-    const computedNodes: Node[] = visibleNodes.map((n) => {
+    return () => {
+      isCancelled = true
+    }
+  }, [layoutKey, visibleNodes, filteredLinks, rootId])
+
+  // Build React Flow nodes & edges with dynamic styling
+  const { rfNodes, rfEdges } = useMemo(() => {
+    if (visibleNodes.length === 0) {
+      return { rfNodes: [], rfEdges: [] }
+    }
+
+    const computedNodes: Node[] = visibleNodes.map((n, idx) => {
       const nId = cleanId(n.id)
-      const isL3 = n.group === 3
-      const nodeH = isL3 ? CARD_HEIGHT_L3 : CARD_HEIGHT_DEFAULT
-      const layoutInfo = g.node(nId)
-
-      const finalX = layoutInfo ? layoutInfo.x - CARD_WIDTH / 2 + offsetX : ANCHOR_X + n.group * 420
-      const finalY = layoutInfo ? layoutInfo.y - nodeH / 2 + offsetY : ANCHOR_Y
-
       const childCount = childMap[nId]?.size || 0
       const isExpanded = autoplayCount !== null ? true : expandedNodeIds.has(nId)
+
+      // Cash-Out / Final Destination Detection
+      const incomingForNode = incomingLinksByTarget[nId] || []
+      const outgoingForNode = normalizedLinks.filter((l) => cleanId(l.source) === nId)
+      const hasIncoming = incomingForNode.length > 0 || filteredLinks.some((l) => cleanId(l.target) === nId)
+      const isTerminal = (childCount === 0 || n.group === 3) && n.group > 0 && nId !== rootId && hasIncoming
+
+      let isCashOut = false
+      let cashOutType = ''
+      let cashOutIcon: 'crypto' | 'atm' | 'forex' | 'cash' | 'terminal' = 'terminal'
+
+      if (isTerminal) {
+        isCashOut = true
+        const allNarrations = incomingForNode
+          .map((l) => `${l.narration || ''} ${l.transaction_narration || ''} ${l.payment_mode || ''}`)
+          .join(' ')
+          .toLowerCase()
+
+        if (/crypto|binance|btc|eth|usdt|wazirx|coindcx|blockchain|token/i.test(allNarrations)) {
+          cashOutType = 'CRYPTO EXCHANGE'
+          cashOutIcon = 'crypto'
+        } else if (/atm|withdrawal|dispense|pos/i.test(allNarrations)) {
+          cashOutType = 'ATM WITHDRAWAL'
+          cashOutIcon = 'atm'
+        } else if (/forex|remit|swift|hawala|international|offshore|crossborder|foreign/i.test(allNarrations)) {
+          cashOutType = 'FOREX / OFFSHORE'
+          cashOutIcon = 'forex'
+        } else if (/cash|settlement|self|bearer/i.test(allNarrations)) {
+          cashOutType = 'CASH CASHOUT'
+          cashOutIcon = 'cash'
+        } else {
+          cashOutType = 'TERMINAL EXIT'
+          cashOutIcon = 'terminal'
+        }
+      }
+
+      const inboundTotal = incomingForNode.reduce((acc, curr) => acc + (Number(curr.amount) || 0), 0)
+      const outboundTotal = outgoingForNode.reduce((acc, curr) => acc + (Number(curr.amount) || 0), 0)
+      const retainedBalance = Math.round((inboundTotal - outboundTotal) * 100) / 100
+      const flowAmount = n.group === -1 ? outboundTotal : inboundTotal > 0 ? inboundTotal : outboundTotal
+      const sampleNarration =
+        incomingForNode[0]?.transaction_narration ||
+        incomingForNode[0]?.narration ||
+        outgoingForNode[0]?.transaction_narration ||
+        outgoingForNode[0]?.narration ||
+        ''
+
+      const pos = layoutPositions[nId] || {
+        x: ANCHOR_X + (n.group === -1 ? -420 : n.group * 420),
+        y: ANCHOR_Y + (idx % 10) * 140,
+      }
+
+      const isDimmed = activeHighlight !== null && !activeHighlight.pathNodeIds.has(nId)
+      const isFocused = activeHighlight !== null && activeHighlight.pathNodeIds.has(nId)
 
       return {
         id: nId,
         type: 'accountCard',
         targetPosition: Position.Left,
         sourcePosition: Position.Right,
-        position: { x: finalX, y: finalY },
+        position: { x: pos.x, y: pos.y },
         width: CARD_WIDTH,
-        height: nodeH,
-        style: { width: CARD_WIDTH, height: nodeH },
+        height: CARD_HEIGHT,
+        style: {
+          width: CARD_WIDTH,
+          height: CARD_HEIGHT,
+          opacity: isDimmed ? 0.15 : 1,
+          filter: isDimmed ? 'grayscale(100%)' : 'none',
+          transition: 'opacity 0.2s ease, filter 0.2s ease',
+          pointerEvents: 'auto',
+          zIndex: isFocused ? 25 : 1,
+        },
         data: {
           id: nId,
           group: n.group,
           bankName: getBankName(nId),
+          flowAmount,
+          narration: sampleNarration,
           childCount,
           isExpanded,
+          isCashOut,
+          cashOutType,
+          cashOutIcon,
+          inboundTotal,
+          outboundTotal,
+          retainedBalance,
           onNodeInteraction: handleNodeInteraction,
           onToggleExpand: handleToggleNodeExpand,
-          onDraftNotice: handleDraftNotice,
         },
       }
     })
 
-    // Build React Flow edges with distinct colors & Bezier curve routing
     const computedEdges: Edge[] = filteredLinks.map((link, idx) => {
       const s = cleanId(link.source)
       const t = cleanId(link.target)
-      const formattedAmt = `$${Number(link.amount).toLocaleString(undefined, {
+      const edgeId = `e-${s}->${t}-${idx}`
+      const formattedAmt = `₹${Number(link.amount).toLocaleString('en-IN', {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
       })}`
 
       // Distinct, elegant colors per hop tier
       const strokeColor =
-        link.hop === 1 ? '#4f46e5' : link.hop === 2 ? '#d97706' : '#e11d48'
+        link.hop === -1
+          ? '#059669'
+          : link.hop === 1
+          ? '#4f46e5'
+          : link.hop === 2
+          ? '#d97706'
+          : '#e11d48'
+
+      const isEdgeDimmed = activeHighlight !== null && !activeHighlight.pathEdgeIds.has(edgeId)
+      const isEdgeFocused = activeHighlight !== null && activeHighlight.pathEdgeIds.has(edgeId)
 
       return {
-        id: `e-${s}->${t}-${idx}`,
+        id: edgeId,
         source: s,
         target: t,
         type: 'bezier',
-        animated: true,
+        animated: isEdgeFocused ? true : !isEdgeDimmed,
+        zIndex: isEdgeFocused ? 20 : 1,
         style: {
           stroke: strokeColor,
-          strokeWidth: Math.min(Math.max((Number(link.amount) || 1000) / 25000, 2), 4.5),
+          strokeWidth: isEdgeFocused
+            ? 4.5
+            : Math.min(Math.max((Number(link.amount) || 1000) / 25000, 2), 4.5),
+          opacity: isEdgeDimmed ? 0.15 : 1,
+          filter: isEdgeDimmed ? 'grayscale(100%)' : 'none',
+          transition: 'opacity 0.2s ease, stroke-width 0.2s ease, filter 0.2s ease',
         },
         markerEnd: {
           type: MarkerType.ArrowClosed,
@@ -1219,11 +1626,13 @@ function NetworkGraphInner({
           formattedAmount: formattedAmt,
           timestamp: link.timestamp,
           hop: link.hop,
+          hop_level: link.hop_level,
           index: idx,
           ip_address: link.ip_address,
           device_type: link.device_type,
           payment_mode: link.payment_mode,
-          narration: link.narration,
+          narration: link.transaction_narration || link.narration || '',
+          transaction_narration: link.transaction_narration || link.narration || '',
           sourceId: s,
           targetId: t,
           onEdgeClick: handleEdgeInteraction,
@@ -1234,19 +1643,19 @@ function NetworkGraphInner({
     return {
       rfNodes: computedNodes,
       rfEdges: computedEdges,
-      rootCenterX: computedRootCenterX,
-      rootCenterY: computedRootCenterY,
     }
   }, [
     visibleNodes,
     filteredLinks,
-    rootId,
+    layoutPositions,
     childMap,
     expandedNodeIds,
     autoplayCount,
+    activeHighlight,
     handleNodeInteraction,
     handleToggleNodeExpand,
     handleDraftNotice,
+    handleEdgeInteraction,
   ])
 
   // --- INITIAL VIEWPORT FIT: SMOOTHLY ZOOMS ONTO ROOT VICTIM NODE ONCE ON INITIAL LOAD ---
@@ -1254,11 +1663,11 @@ function NetworkGraphInner({
     if (rfNodes.length > 0 && !isInitialFitDoneRef.current) {
       isInitialFitDoneRef.current = true
       const timer = setTimeout(() => {
-        setCenter(rootCenterX, rootCenterY, { zoom: 1.15, duration: 800 })
-      }, 100)
+        fitView({ padding: 0.2, duration: 800, maxZoom: 1.2 })
+      }, 200)
       return () => clearTimeout(timer)
     }
-  }, [rfNodes.length, rootCenterX, rootCenterY, setCenter])
+  }, [rfNodes.length, fitView])
 
   return (
     <div
@@ -1379,7 +1788,7 @@ function NetworkGraphInner({
             type="button"
             onClick={handleCollapseToRoot}
             className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-600 text-xs font-semibold border border-slate-200 transition active:scale-95 cursor-pointer shadow-2xs"
-            title="Collapse back to Victim and Layer 1"
+            title="Collapse back to Target Hub and Layer 1"
           >
             <FolderMinus className="h-3.5 w-3.5 text-slate-500" />
             <span>Collapse to Root</span>
@@ -1388,9 +1797,9 @@ function NetworkGraphInner({
           {/* Center Root Camera Button */}
           <button
             type="button"
-            onClick={() => setCenter(rootCenterX, rootCenterY, { zoom: 1.15, duration: 600 })}
+            onClick={() => setCenter(computedRootCenterX, computedRootCenterY, { zoom: 1.2, duration: 700 })}
             className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-medium border border-slate-200 transition cursor-pointer shadow-2xs"
-            title="Focus camera on Root Victim node"
+            title="Focus camera on Target Hub suspect node"
           >
             <Focus className="h-3.5 w-3.5 text-indigo-600" />
             <span className="text-[11px] font-semibold">Focus Root</span>
@@ -1399,21 +1808,32 @@ function NetworkGraphInner({
           {/* Fit View Button */}
           <button
             type="button"
-            onClick={() => fitView({ padding: 0.2, duration: 600 })}
-            className="p-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-600 text-xs border border-slate-200 transition cursor-pointer shadow-2xs"
+            onClick={() => fitView({ padding: 0.2, duration: 800, maxZoom: 1.2 })}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-semibold border border-slate-200 transition active:scale-95 cursor-pointer shadow-2xs"
             title="Fit Entire Graph into View"
           >
-            <Maximize2 className="h-3.5 w-3.5" />
+            <Maximize className="h-3.5 w-3.5 text-indigo-600" />
+            <span className="text-[11px]">Fit View</span>
           </button>
 
           {/* Fullscreen Button */}
           <button
             type="button"
             onClick={toggleFullscreen}
-            className="p-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200 transition cursor-pointer shadow-2xs"
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-semibold border border-slate-200 transition active:scale-95 cursor-pointer shadow-2xs"
             title={isFullscreen ? 'Exit Fullscreen' : 'View Fullscreen Canvas'}
           >
-            {isFullscreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+            {isFullscreen ? (
+              <>
+                <Minimize2 className="h-3.5 w-3.5 text-slate-600" />
+                <span className="text-[11px]">Exit Screen</span>
+              </>
+            ) : (
+              <>
+                <Monitor className="h-3.5 w-3.5 text-indigo-600" />
+                <span className="text-[11px]">Full Screen</span>
+              </>
+            )}
           </button>
         </div>
       </div>
@@ -1435,7 +1855,7 @@ function NetworkGraphInner({
             </div>
             <span className="text-slate-300">|</span>
             <div className="flex items-center gap-1 text-emerald-700 font-bold">
-              <span>${visibleVolume.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+              <span>₹{visibleVolume.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
             </div>
           </div>
 
@@ -1444,6 +1864,42 @@ function NetworkGraphInner({
             <span className="text-slate-500">Active Horizon:</span>
             <span className="font-bold text-slate-800">{formattedOverlayDate}</span>
           </div>
+
+          {targetRetainedBalance !== null && (
+            <div className="bg-white/95 backdrop-blur-md border border-slate-200 px-3 py-1.5 rounded-xl shadow-md flex items-center gap-2 text-[10px]">
+              <span className="text-slate-500 font-medium">Target Retained:</span>
+              <span
+                className={`font-black font-mono px-1.5 py-0.2 rounded border ${
+                  targetRetainedBalance >= 0
+                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                    : 'bg-rose-50 text-rose-700 border-rose-200'
+                }`}
+              >
+                {targetRetainedBalance >= 0 ? '+' : '-'}₹{Math.abs(targetRetainedBalance).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </span>
+            </div>
+          )}
+
+          {highlightedPathNodeId && (
+            <div className="bg-indigo-600/95 backdrop-blur-md text-white border border-indigo-500 px-3 py-1.5 rounded-xl shadow-lg flex items-center justify-between gap-2 pointer-events-auto">
+              <div className="flex items-center gap-1.5">
+                <span className="h-2 w-2 rounded-full bg-emerald-400 animate-ping"></span>
+                <span className="text-[10px] text-indigo-200">Active Path:</span>
+                <span className="font-bold text-white text-[11px]">{highlightedPathNodeId}</span>
+              </div>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setHighlightedPathNodeId(null)
+                }}
+                className="p-0.5 rounded hover:bg-indigo-500 text-indigo-200 hover:text-white transition cursor-pointer"
+                title="Reset Path Highlight (or click background)"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          )}
         </div>
 
         {/* DRAGGABLE POPUP CARD: MOVABLE TELEMETRY DETAILS */}
@@ -1501,16 +1957,25 @@ function NetworkGraphInner({
                   <div className="flex items-center justify-between">
                     <span className="text-slate-500">Inbound Inflow:</span>
                     <span className="font-bold text-emerald-600">
-                      ${tooltip.data.totalIn.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ({tooltip.data.inboundCount})
+                      ₹{tooltip.data.totalIn.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ({tooltip.data.inboundCount})
                     </span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-slate-500">Outbound Dispersal:</span>
                     <span className="font-bold text-rose-600">
-                      ${tooltip.data.totalOut.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ({tooltip.data.outboundCount})
+                      ₹{tooltip.data.totalOut.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ({tooltip.data.outboundCount})
                     </span>
                   </div>
                 </div>
+                {tooltip.data.sampleNarration && (
+                  <div className="p-2 rounded-lg bg-slate-50 border border-slate-200 text-[10px] text-slate-600">
+                    <div className="text-slate-500 flex items-center gap-1 font-semibold mb-0.5">
+                      <FileText className="h-3 w-3 text-slate-400" />
+                      <span>Narration / Forensic Memo:</span>
+                    </div>
+                    <span className="font-mono text-slate-800 break-words">{tooltip.data.sampleNarration}</span>
+                  </div>
+                )}
                 {(tooltip.data.sampleIp || tooltip.data.sampleDevice) && (
                   <div className="text-[10px] text-slate-500 flex flex-col gap-0.5 pt-1 border-t border-slate-100">
                     {tooltip.data.sampleIp && (
@@ -1570,12 +2035,12 @@ function NetworkGraphInner({
                     </span>
                   </div>
                 </div>
-                {tooltip.data.narration && (
-                  <div className="text-[10px] text-slate-600 bg-slate-50 p-1.5 rounded border border-slate-200">
-                    <div className="text-slate-500 flex items-center gap-1 mb-0.5">
-                      <FileText className="h-2.5 w-2.5" /> Memo:
+                {(tooltip.data.transaction_narration || tooltip.data.narration) && (
+                  <div className="text-[10px] text-slate-600 bg-slate-50 p-2 rounded-lg border border-slate-200">
+                    <div className="text-slate-500 flex items-center gap-1 mb-0.5 font-semibold">
+                      <FileText className="h-3 w-3 text-slate-400" /> Narration / Memo:
                     </div>
-                    {tooltip.data.narration}
+                    <span className="font-mono text-slate-800 break-words">{tooltip.data.transaction_narration || tooltip.data.narration}</span>
                   </div>
                 )}
                 {(tooltip.data.ip_address || tooltip.data.device_type) && (
@@ -1604,16 +2069,24 @@ function NetworkGraphInner({
           nodeTypes={nodeTypes}
           edgeTypes={edgeTypes}
           panOnDrag={true}
-          panOnScroll={true}
           zoomOnScroll={true}
-          zoomOnPinch={true}
           selectionOnDrag={false}
           nodesDraggable={true}
           minZoom={0.05}
           maxZoom={2.5}
+          onNodeMouseEnter={(_, node) => {
+            if (!highlightedPathNodeId) setHoveredNodeId(cleanId(node.id))
+          }}
+          onNodeMouseLeave={() => {
+            if (!highlightedPathNodeId) setHoveredNodeId(null)
+          }}
+          onNodeClick={(_, node) => handleNodePathClick(cleanId(node.id))}
           onPaneClick={() => {
+            setHighlightedPathNodeId(null)
             setTooltip(null)
             setPopupPos(null)
+            setHoveredNodeId(null)
+            setSelectedNodeDetail(null)
           }}
           proOptions={{ hideAttribution: true }}
           className="bg-slate-50"
@@ -1621,28 +2094,334 @@ function NetworkGraphInner({
           <Background variant={BackgroundVariant.Dots} gap={20} size={1.5} color="#cbd5e1" className="bg-slate-50" />
           <Controls showInteractive={false} className="!bg-white !border-slate-200 !text-slate-700 !shadow-md [&>button]:!bg-white [&>button]:!border-slate-200 [&>button]:!fill-slate-700 [&>button:hover]:!bg-slate-50" />
           
-          {/* DYNAMIC MINIMAP WITH EXPLICIT SIZING & COLOR CODING */}
+          {/* DARK GLASS-MORPHISM MINIMAP AT BOTTOM-4 RIGHT-4 */}
           <MiniMap
+            position="bottom-right"
             nodeColor={(node: any) => {
               const group = node.data?.group ?? node.group ?? 0
-              if (group === 0) return '#10b981' // Victim (Emerald)
-              if (group === 1) return '#4f46e5' // Layer 1 (Indigo)
-              if (group === 2) return '#f59e0b' // Layer 2 (Amber)
-              if (group === 3) return '#ef4444' // Layer 3 (Red)
+              if (group === -1) return '#10b981' // Source of Funds (Emerald)
+              if (group === 0) return '#f43f5e'  // Target Hub Suspect (Rose)
+              if (group === 1) return '#6366f1'  // Layer 1 (Indigo)
+              if (group === 2) return '#f59e0b'  // Layer 2 (Amber)
+              if (group === 3) return '#ef4444'  // Layer 3 (Red)
               return '#94a3b8'
             }}
             nodeStrokeColor="#ffffff"
             nodeStrokeWidth={2}
             nodeBorderRadius={3}
-            maskColor="rgba(241, 245, 249, 0.75)"
+            maskColor="rgba(15, 23, 42, 0.65)"
             maskStrokeColor="#6366f1"
             maskStrokeWidth={2}
             zoomable={true}
             pannable={true}
-            className="!h-32 !w-48 !bg-white !border !border-slate-200 !rounded-xl !shadow-lg overflow-hidden"
+            className="!h-32 !w-48 !bg-slate-900/90 !backdrop-blur-md !border !border-slate-700/60 !rounded-xl !shadow-2xl overflow-hidden !m-4 !z-50"
             style={{ width: 192, height: 128 }}
           />
         </ReactFlow>
+
+        {/* ========================================================================= */}
+        {/* NODE DETAIL SIDE PANEL: DEEP FORENSICS, COUNTERPARTIES & BULK FREEZE */}
+        {/* ========================================================================= */}
+        {selectedNodeDetail && !isNoticeDrawerOpen && (
+          <div
+            className="drawer-slide-in absolute top-0 right-0 bottom-0 w-full sm:w-[480px] z-40 bg-white border-l border-slate-200 shadow-2xl flex flex-col overflow-hidden text-slate-800"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Panel Top Header */}
+            <div className="p-4 bg-slate-900 text-white border-b border-slate-800 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="h-8 w-8 rounded-lg bg-indigo-500/20 border border-indigo-500/40 flex items-center justify-center text-indigo-400">
+                  <ShieldAlert className="h-4 w-4" />
+                </div>
+                <div>
+                  <h3 className="text-xs font-bold tracking-tight uppercase font-mono flex items-center gap-1.5">
+                    <span>Account Forensic Profile</span>
+                    <span className="px-1.5 py-0.2 rounded text-[9px] bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-sans">
+                      OSINT Inspection
+                    </span>
+                  </h3>
+                  <p className="text-[10px] text-slate-400 font-sans mt-0.5">
+                    Multi-Layer Telemetry &amp; Laundering Network Inspection
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedNodeDetail(null)
+                  setHighlightedPathNodeId(null)
+                }}
+                className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition cursor-pointer"
+                title="Close inspection panel"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {/* Panel Body Content (Scrollable) */}
+            <div className="flex-1 p-4 overflow-y-auto flex flex-col gap-3 bg-slate-50 text-xs">
+              {/* Card 1: Target Identity & Layer Tier */}
+              <div className="p-3.5 rounded-xl bg-white border border-slate-200 shadow-2xs flex flex-col gap-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-sm font-black text-slate-900">
+                      {selectedNodeDetail.id}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(selectedNodeDetail.id)
+                      }}
+                      className="p-1 rounded text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer"
+                      title="Copy Account ID"
+                    >
+                      <Copy className="h-3 w-3" />
+                    </button>
+                  </div>
+                  <span
+                    className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-full border ${
+                      selectedNodeDetail.group === -1
+                        ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                        : selectedNodeDetail.group === 0
+                        ? 'bg-rose-50 text-rose-700 border-rose-200'
+                        : selectedNodeDetail.group === 1
+                        ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                        : selectedNodeDetail.group === 2
+                        ? 'bg-amber-50 text-amber-700 border-amber-200'
+                        : 'bg-rose-50 text-rose-700 border-rose-200'
+                    }`}
+                  >
+                    {selectedNodeDetail.group === -1
+                      ? 'Source of Funds (Feeder)'
+                      : selectedNodeDetail.group === 0
+                      ? 'Target Hub (Primary Suspect)'
+                      : `Layer ${selectedNodeDetail.group} Node`}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-1.5 text-slate-600 font-sans text-xs">
+                  <Building className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                  <span className="font-medium">{selectedNodeDetail.bankName}</span>
+                </div>
+
+                {(selectedNodeDetail.ipAddress || selectedNodeDetail.deviceType) && (
+                  <div className="flex items-center flex-wrap gap-2 pt-2 border-t border-slate-100 text-[11px] text-slate-500 font-mono">
+                    {selectedNodeDetail.ipAddress && (
+                      <span className="inline-flex items-center gap-1 bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
+                        <Globe className="h-3 w-3 text-slate-400" />
+                        <span>IP: {selectedNodeDetail.ipAddress}</span>
+                      </span>
+                    )}
+                    {selectedNodeDetail.deviceType && (
+                      <span className="inline-flex items-center gap-1 bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
+                        <Smartphone className="h-3 w-3 text-slate-400" />
+                        <span>{selectedNodeDetail.deviceType}</span>
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Card 2: Financial Throughput & Velocity */}
+              <div className="grid grid-cols-2 gap-2.5 font-mono">
+                <div className="p-3 rounded-xl bg-white border border-slate-200 shadow-2xs flex flex-col gap-1">
+                  <span className="text-[10px] text-slate-500 font-medium">Inbound Total</span>
+                  <span className="text-sm font-black text-emerald-600">
+                    ₹{selectedNodeDetail.inboundTotal.toLocaleString('en-IN', {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}
+                  </span>
+                  <span className="text-[10px] text-slate-400">{selectedNodeDetail.inboundCount} incoming transfer(s)</span>
+                </div>
+
+                <div className="p-3 rounded-xl bg-white border border-slate-200 shadow-2xs flex flex-col gap-1">
+                  <span className="text-[10px] text-slate-500 font-medium">Outbound Total</span>
+                  <span className="text-sm font-black text-rose-600">
+                    ₹{selectedNodeDetail.outboundTotal.toLocaleString('en-IN', {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}
+                  </span>
+                  <span className="text-[10px] text-slate-400">{selectedNodeDetail.outboundCount} outgoing transfer(s)</span>
+                </div>
+              </div>
+
+              {/* Retained Balance Badge */}
+              <div className="p-3 rounded-xl bg-white border border-slate-200 shadow-2xs flex items-center justify-between font-mono">
+                <span className="text-[11px] text-slate-500 font-medium">Retained in Account:</span>
+                <span
+                  className={`text-xs font-black px-2 py-0.5 rounded border ${
+                    selectedNodeDetail.retainedBalance >= 0
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                      : 'bg-rose-50 text-rose-700 border-rose-200'
+                  }`}
+                >
+                  {selectedNodeDetail.retainedBalance >= 0 ? '+' : '-'}₹
+                  {Math.abs(selectedNodeDetail.retainedBalance).toLocaleString('en-IN', {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}
+                </span>
+              </div>
+
+              {/* Card 3: Forensic Narration / Memo */}
+              {selectedNodeDetail.narration && (
+                <div className="p-3 rounded-xl bg-white border border-slate-200 shadow-2xs flex flex-col gap-1">
+                  <div className="flex items-center gap-1.5 text-slate-500 font-semibold text-[11px]">
+                    <FileText className="h-3.5 w-3.5 text-slate-400" />
+                    <span>Transaction Memo / Narration</span>
+                  </div>
+                  <p className="font-mono text-xs text-slate-800 break-words bg-slate-50 p-2 rounded-lg border border-slate-200">
+                    {selectedNodeDetail.narration}
+                  </p>
+                </div>
+              )}
+
+              {/* Card 4: Immediate Counterparties Breakdown */}
+              <div className="p-3.5 rounded-xl bg-white border border-slate-200 shadow-2xs flex flex-col gap-2.5">
+                <span className="text-[11px] font-bold text-slate-800 uppercase tracking-wide flex items-center gap-1.5 font-mono">
+                  <Users className="h-3.5 w-3.5 text-indigo-600" />
+                  <span>Immediate Counterparties</span>
+                </span>
+
+                {/* Inbound Transfers */}
+                {selectedNodeDetail.inboundLinks.length > 0 && (
+                  <div className="flex flex-col gap-1">
+                    <span className="text-[10px] font-semibold text-slate-500 font-mono">
+                      Inbound Sources ({selectedNodeDetail.inboundLinks.length})
+                    </span>
+                    <div className="max-h-28 overflow-y-auto divide-y divide-slate-100 rounded-lg border border-slate-100 bg-slate-50/50">
+                      {selectedNodeDetail.inboundLinks.slice(0, 5).map((l, idx) => (
+                        <div key={idx} className="p-2 flex items-center justify-between text-[11px] font-mono">
+                          <span className="text-slate-700 truncate max-w-[180px]">{cleanId(l.source)}</span>
+                          <span className="font-bold text-emerald-600">
+                            +₹{Number(l.amount).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Outbound Transfers */}
+                {selectedNodeDetail.outboundLinks.length > 0 && (
+                  <div className="flex flex-col gap-1">
+                    <span className="text-[10px] font-semibold text-slate-500 font-mono">
+                      Outbound Dispersals ({selectedNodeDetail.outboundLinks.length})
+                    </span>
+                    <div className="max-h-28 overflow-y-auto divide-y divide-slate-100 rounded-lg border border-slate-100 bg-slate-50/50">
+                      {selectedNodeDetail.outboundLinks.slice(0, 5).map((l, idx) => (
+                        <div key={idx} className="p-2 flex items-center justify-between text-[11px] font-mono">
+                          <span className="text-slate-700 truncate max-w-[180px]">{cleanId(l.target)}</span>
+                          <span className="font-bold text-rose-600">
+                            -₹{Number(l.amount).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Card 5: Downstream Connected Syndicate Network (if descendants exist) */}
+              {selectedNodeDetail.downstreamAccounts.length > 0 && (
+                <div className="p-3.5 rounded-xl bg-rose-50/70 border border-rose-200 shadow-2xs flex flex-col gap-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold text-rose-900 uppercase tracking-wide flex items-center gap-1.5 font-mono">
+                      <ShieldAlert className="h-3.5 w-3.5 text-rose-600" />
+                      <span>Downstream Syndicate ({selectedNodeDetail.downstreamAccounts.length})</span>
+                    </span>
+                    <span className="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-rose-200 text-rose-800">
+                      Layer 1-3 Mules
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-rose-700 font-sans leading-relaxed">
+                    Recursive BFS traversal detected <strong>{selectedNodeDetail.downstreamAccounts.length} reachable downstream beneficiary account(s)</strong> receiving laundered dispersal from this entity.
+                  </p>
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {selectedNodeDetail.downstreamAccounts.slice(0, 8).map((acc, aIdx) => (
+                      <span
+                        key={aIdx}
+                        className="px-1.5 py-0.5 rounded bg-white border border-rose-200 text-rose-800 text-[10px] font-mono font-semibold shadow-2xs"
+                      >
+                        {acc}
+                      </span>
+                    ))}
+                    {selectedNodeDetail.downstreamAccounts.length > 8 && (
+                      <span className="px-1.5 py-0.5 rounded bg-rose-100 text-rose-800 text-[10px] font-mono font-bold">
+                        +{selectedNodeDetail.downstreamAccounts.length - 8} more
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Panel Bottom Action Buttons */}
+            <div className="p-4 bg-white border-t border-slate-200 flex flex-col gap-2 shrink-0 shadow-lg">
+              {/* High-Priority Bulk Network Freeze Action (rendered prominently when downstream descendants exist) */}
+              {selectedNodeDetail.downstreamAccounts.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const totalVol =
+                      selectedNodeDetail.outboundTotal > 0
+                        ? selectedNodeDetail.outboundTotal
+                        : selectedNodeDetail.inboundTotal > 0
+                        ? selectedNodeDetail.inboundTotal
+                        : 50000
+                    handleDraftNotice(
+                      selectedNodeDetail.id,
+                      selectedNodeDetail.bankName,
+                      selectedNodeDetail.downstreamAccounts,
+                      true,
+                      totalVol
+                    )
+                  }}
+                  className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-rose-600 to-red-700 hover:from-rose-500 hover:to-red-600 text-white font-bold text-xs shadow-md shadow-rose-600/30 transition active:scale-95 cursor-pointer"
+                  title="Generate Comprehensive Multi-Account Syndicate Sec 91 Freezing Order"
+                >
+                  <ShieldAlert className="h-4 w-4" />
+                  <span>Freeze Downstream Network (Bulk Action &bull; {selectedNodeDetail.downstreamAccounts.length} Accounts)</span>
+                </button>
+              )}
+
+              {/* Single Node Notice & Ask AI Buttons */}
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleDraftNotice(
+                      selectedNodeDetail.id,
+                      selectedNodeDetail.bankName,
+                      [selectedNodeDetail.id],
+                      false,
+                      selectedNodeDetail.flowAmount
+                    )
+                  }}
+                  className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold transition shadow-xs cursor-pointer active:scale-95"
+                >
+                  <Shield className="h-3.5 w-3.5" />
+                  <span>Draft Sec 91 Notice</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (onAskAI) {
+                      onAskAI(selectedNodeDetail.id)
+                    }
+                  }}
+                  className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold transition cursor-pointer active:scale-95 shadow-xs"
+                >
+                  <Bot className="h-3.5 w-3.5" />
+                  <span>Ask AI</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* ========================================================================= */}
         {/* PHASE 4: RIGHT-SIDE PANEL (DRAWER OVERLAY) FOR SECTION 91 NOTICE & PDF EXPORT */}
@@ -1700,9 +2479,14 @@ function NetworkGraphInner({
                     <span className="text-slate-600 font-sans text-[11px] truncate max-w-[130px]" title={activeNoticeTarget.bankName}>
                       {activeNoticeTarget.bankName}
                     </span>
+                    {activeNoticeTarget.isBulk && (
+                      <span className="px-1.5 py-0.2 rounded text-[9px] bg-rose-200 text-rose-900 font-bold border border-rose-300">
+                        SYNDICATE ({activeNoticeTarget.connectedAccounts?.length || 0} MULES)
+                      </span>
+                    )}
                   </div>
                   <span className="px-2 py-0.5 rounded bg-rose-100 text-rose-800 font-extrabold text-[11px] border border-rose-200">
-                    ${activeNoticeTarget.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    ₹{activeNoticeTarget.amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                   </span>
                 </div>
               )}

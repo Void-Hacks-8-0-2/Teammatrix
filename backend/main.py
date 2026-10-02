@@ -2,7 +2,7 @@ import os
 import shutil
 import tempfile
 import traceback
-from typing import Optional
+from typing import Optional, List
 from pydantic import BaseModel
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -243,6 +243,8 @@ class GenerateNoticeRequest(BaseModel):
     account_id: str
     bank_name: str
     amount: float
+    connected_accounts: Optional[List[str]] = None
+    is_bulk: Optional[bool] = False
 
 
 class AIChatRequest(BaseModel):
@@ -278,11 +280,22 @@ def ai_chat(req: AIChatRequest):
     msg = req.message.strip()
     target_account = req.account_id.strip() if req.account_id else None
 
+    # Guardrail 1: Check if transactions table exists and has rows in DuckDB
+    info = database.get_table_info()
+    if info.get("row_count", 0) == 0:
+        return {
+            "status": "idle",
+            "account_id": None,
+            "response": "System idle. Waiting for transaction journal CSV upload. No transaction records currently loaded in DuckDB.",
+            "summary": None,
+            "source": "forensic_engine",
+            "suggested_actions": []
+        }
+
     # Parse account ID from message text if not explicitly supplied
     if not target_account:
-        # Match alphanumeric tokens like KKBK10000405
         tokens = re.findall(r'\b[A-Za-z0-9_]{6,25}\b', msg)
-        stop_words = {"analyze", "victim", "account", "suspect", "freeze", "notice", "investigate", "report", "please", "thanks", "status", "detail", "details", "check", "urgent"}
+        stop_words = {"analyze", "victim", "account", "suspect", "freeze", "notice", "investigate", "report", "please", "thanks", "status", "detail", "details", "check", "urgent", "dataset"}
         for t in tokens:
             if t.lower() not in stop_words and any(c.isdigit() for c in t):
                 target_account = t.strip()
@@ -297,14 +310,23 @@ def ai_chat(req: AIChatRequest):
     summary = None
     if target_account:
         summary = database.get_account_forensic_summary(target_account)
+        if not summary or not summary.get("found"):
+            return {
+                "status": "not_found",
+                "account_id": target_account,
+                "response": f"Account `{target_account}` was not found in the active transaction ledger. Please check the account number or verify against the uploaded dataset.",
+                "summary": None,
+                "source": "forensic_engine",
+                "suggested_actions": []
+            }
 
     # If an account is identified and summarized in DuckDB
     if summary and summary.get("found"):
         summary_data = (
             f"Target Account: {summary['account']}\n"
             f"Risk Score: {summary['risk_score']}% (Capped at 99%)\n"
-            f"Total Inflow Received: ${summary['total_in']:,.2f} across {summary['in_count']} transactions ({summary['unique_senders']} unique senders)\n"
-            f"Total Outflow Dispersed: ${summary['total_out']:,.2f} across {summary['out_count']} transactions ({summary['unique_receivers']} unique receivers)\n"
+            f"Total Inflow Received: ₹{summary['total_in']:,.2f} across {summary['in_count']} transactions ({summary['unique_senders']} unique senders)\n"
+            f"Total Outflow Dispersed: ₹{summary['total_out']:,.2f} across {summary['out_count']} transactions ({summary['unique_receivers']} unique receivers)\n"
             f"Wash Ratio: {summary['wash_ratio']}%\n"
             f"Associated IPs: {summary['ips']}\n"
             f"Hardware / Devices: {summary['devices']}\n"
@@ -313,8 +335,11 @@ def ai_chat(req: AIChatRequest):
         )
 
         prompt = (
-            f"You are a cyber forensics AI. Based on this transaction summary: {summary_data}, "
-            f"what are the potential risks and next steps for investigation?"
+            f"You are an expert financial forensic investigator. Analyze the following account data dynamically and conversationally. "
+            f"Explain WHY each metric — the Wash Ratio, the Structuring pattern, the Off-hours activity, the device fingerprint — is suspicious. "
+            f"Do NOT just spit out a rigid template. Be insightful: make connections between these signals, explain what they reveal about the suspect's behavior, "
+            f"and conclude with ONE specific recommended next human action the investigator should take right now.\n\n"
+            f"Account Data:\n{summary_data}"
         )
 
         ai_response_text = None
@@ -340,17 +365,30 @@ def ai_chat(req: AIChatRequest):
 
         # Statutory Forensic Engine Fallback if Ollama is not active
         if not ai_response_text:
+            wash_pct = summary['wash_ratio']
+            in_amt = f"₹{summary['total_in']:,.2f}"
+            out_amt = f"₹{summary['total_out']:,.2f}"
+            acc = summary['account']
+            score = summary['risk_score']
+            receivers = summary['unique_receivers']
+            senders = summary['unique_senders']
+            device = summary['devices']
+            ip = summary['primary_ip']
+            in_txns = summary['in_count']
+            out_txns = summary['out_count']
+
             ai_response_text = (
-                f"**CYBER FORENSICS INTELLIGENCE ASSESSMENT**\n\n"
-                f"**Target Entity:** `{summary['account']}` | **Risk Rating:** **{summary['risk_score']}%** (CRITICAL)\n\n"
-                f"**1. Core Forensic Risks Identified:**\n"
-                f"• **High-Velocity Pass-Through:** Account exhibits a **{summary['wash_ratio']}% wash ratio**, receiving ${summary['total_in']:,.2f} across {summary['in_count']} inbound transfers and immediately dispersing ${summary['total_out']:,.2f} across {summary['out_count']} outbound transactions. This high-velocity throughput is consistent with a specialized mule aggregation hub.\n"
-                f"• **Structuring & Layering:** Inbound funds are fragmented and distributed among {summary['unique_receivers']} distinct downstream recipients, indicating smurfing techniques designed to circumvent mandatory AML threshold alerts.\n"
-                f"• **Virtualization & Geo-Anomalies:** Telemetry traces to `{summary['devices']}` originating from IP `{summary['primary_ip']}`, suggesting automated scripting / emulator signatures and proxy redirection.\n\n"
-                f"**2. Recommended Next Steps for Investigation:**\n"
-                f"1. **Statutory Freezing Order:** Issue an immediate Section 91 CrPC notice to freeze Account `{summary['account']}` before funds complete downstream cash-out.\n"
-                f"2. **3-Hop Directional Traversal:** Expand the visual money trail graph to identify Layer 2 and Layer 3 beneficiary terminals.\n"
-                f"3. **Bank Dossier Requisition:** Requisition certified KYC records, Account Opening Forms (AOF), linked UPI VPA handles, and biometric authentication logs from the branch manager."
+                f"Looking at this account `{acc}`, a few things immediately stand out to me as deeply suspicious when you connect the dots.\n\n"
+                f"**The {wash_pct}% Wash Ratio is the smoking gun.** This account received {in_amt} from {senders} different sources across {in_txns} inbound transactions, then "
+                f"almost immediately dispersed {out_amt} outward to {receivers} different beneficiaries across {out_txns} outgoing transfers. "
+                f"That near-complete passthrough — retaining almost nothing — is textbook mule behavior. Real people and businesses retain some funds. This account behaves like a relay station.\n\n"
+                f"**The fan-out to {receivers} receivers is deliberate structuring.** By splitting the inbound lump sum into smaller chunks across many recipients, "
+                f"this account is specifically designed to stay below bank-level reporting thresholds. Each individual transfer looks innocuous; together they tell a story of systematic layering.\n\n"
+                f"**The device fingerprint from `{device}` (IP: `{ip}`) adds the tech fraud signature.** When you see emulator or automation tooling associated with a financial account, "
+                f"it almost always means scripted transfers — not a human sitting at a branch. This level of automation suggests organized cyber fraud.\n\n"
+                f"**My recommended next action:** Issue an immediate Section 91 CrPC freezing directive on `{acc}` to halt any remaining outbound dissipation, "
+                f"then expand the 3-hop graph to trace where those {receivers} recipients are sending the money next. The clock is ticking — structured funds typically reach cash-out terminals within 24-48 hours. "
+                f"Risk Score: **{score}%**."
             )
 
         amount_val = summary["total_in"] if summary["total_in"] > 0 else summary["total_out"]
@@ -378,13 +416,24 @@ def ai_chat(req: AIChatRequest):
 
     # General questions or proactive assistant responses
     top = database.get_top_suspect()
-    top_acc = top["account"] if top else "KKBK10000405"
-    top_score = top["risk_score"] if top else 99
+    if not top:
+        return {
+            "status": "no_suspects",
+            "account_id": None,
+            "response": "Active dataset scanned. No high-risk laundering entities or suspicious transaction patterns detected in current records.",
+            "summary": None,
+            "source": "forensic_engine",
+            "suggested_actions": []
+        }
+
+    top_acc = top["account"]
+    top_score = top["risk_score"]
+    top_amt = top["total_in"] if top.get("total_in") and top["total_in"] > 0 else top.get("total_out", 0.0)
 
     general_prompt = (
         f"You are a cyber forensics AI. A financial crime investigator asks: '{msg}'. "
-        f"Context: The highest risk flagged account in current ledger is {top_acc} with a {top_score}% risk score. "
-        f"Keep your response concise, professional, and action-oriented."
+        f"Analyze this transaction data. Highlight key risks (like velocity or structuring) and suggest the next investigative step. Be analytical. "
+        f"Context: The highest risk flagged account in current ledger is {top_acc} with a {top_score}% risk score and volume of ₹{top_amt:,.2f}."
     )
 
     general_text = None
@@ -397,8 +446,8 @@ def ai_chat(req: AIChatRequest):
 
     if not general_text:
         general_text = (
-            f"I have scanned the active ledger. Flagged account `{top_acc}` shows a **{top_score}% risk** "
-            f"of being an active money mule hub due to rapid off-hour transfers and proxy signatures. "
+            f"I have scanned the active ledger. Priority target `{top_acc}` exhibits a **{top_score}% risk score** "
+            f"with ₹{top_amt:,.2f} in observed volume. Signature indicates rapid passthrough and smurfing distribution. "
             f"Would you like me to generate a Section 91 CrPC freeze notice or trace its 3-hop money trail?"
         )
 
@@ -414,7 +463,7 @@ def ai_chat(req: AIChatRequest):
                 "label": f"Draft Sec 91 Notice ({top_acc})",
                 "account_id": top_acc,
                 "bank_name": "Beneficiary Bank",
-                "amount": top["total_in"] if top and top.get("total_in") else 245000.0,
+                "amount": top_amt,
             },
             {
                 "type": "trace_graph",
@@ -425,24 +474,140 @@ def ai_chat(req: AIChatRequest):
     }
 
 
+@app.get("/api/ai/global-scan")
+@app.post("/api/ai/global-scan")
+def ai_global_scan():
+    """
+    Executes a dataset-wide macro analysis across DuckDB transactions ledger.
+    Aggregates volume, row count, unique accounts, top suspect hubs, and structuring anomalies.
+    Returns executive summary formatted in Markdown with analytical insights.
+    """
+    info = database.get_table_info()
+    total_rows = info.get("row_count", 0)
+    stats = info.get("stats", {})
+    total_volume = stats.get("total_volume", 0.0)
+
+    if total_rows == 0:
+        return {
+            "status": "idle",
+            "total_rows": 0,
+            "total_volume": 0.0,
+            "flagged_entities": 0,
+            "top_suspect": None,
+            "report": "### ⚠️ System Idle — Waiting for Data Ingestion\n\nNo transaction records found in the DuckDB ledger. Please upload a transaction journal CSV to perform macro scanning and network forensic analysis.",
+            "suggested_actions": []
+        }
+
+    suspicious_summary = database.get_suspicious_accounts(page=1, limit=5)
+    flagged_count = suspicious_summary.get("total_rows", 0)
+    top_list = suspicious_summary.get("data", [])
+
+    top = database.get_top_suspect()
+    top_acc = top["account"] if top else (top_list[0]["account"] if top_list else None)
+    top_score = top["risk_score"] if top else (top_list[0]["risk_score"] if top_list else 0)
+    top_in = top["total_in"] if top and top.get("total_in") else (top_list[0]["total_received"] if top_list else 0.0)
+
+    top_bullets = "\n".join([
+        f"• **Account `{item['account']}`**: Risk Score **{item['risk_score']}%** | Inflow: ₹{item['total_received']:,.2f} | Outflow: ₹{item['total_sent']:,.2f} | Wash Ratio: {item['wash_ratio']}%"
+        for item in top_list[:3]
+    ]) if top_list else "No anomalous accounts detected."
+
+    prompt = (
+        f"You are a financial forensics AI. Analyze this full dataset overview and provide a macro threat report. "
+        f"Total Records: {total_rows:,}, Total Volume: ₹{total_volume:,.2f}, Flagged High-Risk Entities: {flagged_count:,}.\n"
+        f"Top Flagged Suspects:\n{top_bullets}\n"
+        f"Highlight key macro risks (velocity, smurfing networks, threshold evasion) and suggest prioritized next investigative steps. Be analytical."
+    )
+
+    ollama_text = None
+    try:
+        res = requests.post(
+            "http://localhost:11434/api/generate",
+            json={"model": "qwen2.5:1.5b", "prompt": prompt, "stream": False},
+            timeout=25,
+        )
+        if res.status_code == 200:
+            ollama_text = res.json().get("response", "").strip()
+    except Exception:
+        pass
+
+    if not ollama_text:
+        ollama_text = (
+            f"### **Macro Forensic Dataset Scan Report**\n\n"
+            f"**Ledger Scope:** Analyzed **{total_rows:,} records** representing **₹{total_volume:,.2f}** in gross transactional volume. "
+            f"DuckDB heuristic engine identified **{flagged_count:,} high-risk laundering entities**.\n\n"
+            f"#### **1. Key Syndicated Patterns Detected:**\n"
+            f"• **High-Velocity Aggregation & Smurfing:** Inflow funds are immediately dispersed across downstream nodes within <24-hour windows, minimizing asset recovery windows.\n"
+            f"• **Threshold Evasion (Structuring):** Repeated transaction clusters hovering just below statutory reporting thresholds (₹49,000–₹49,999).\n"
+            f"• **Priority Suspect Hubs:**\n"
+            f"{top_bullets}\n\n"
+            f"#### **2. Prioritized Investigative Actions:**\n"
+            f"1. **Statutory Freezing:** Issue Section 91 CrPC freezing notices on Priority Target `{top_acc}` to halt further outbound dissipation.\n"
+            f"2. **Multi-Hop Traversal:** Trace 3-hop downstream disbursement networks to identify ultimate cash-out terminals and crypto exchanges.\n"
+            f"3. **Bank Dossier Requisition:** Requisition KYC documents and IP logs from respective beneficiary banks."
+        )
+
+    suggested_actions = []
+    if top_acc:
+        suggested_actions = [
+            {
+                "type": "trace_graph",
+                "label": f"Trace Priority Target ({top_acc})",
+                "account_id": top_acc,
+            },
+            {
+                "type": "freeze_notice",
+                "label": f"Draft Sec 91 Notice ({top_acc})",
+                "account_id": top_acc,
+                "bank_name": "Beneficiary Bank",
+                "amount": top_in,
+            },
+        ]
+
+    return {
+        "status": "success",
+        "total_rows": total_rows,
+        "total_volume": total_volume,
+        "flagged_entities": flagged_count,
+        "top_suspect": top_acc,
+        "report": ollama_text,
+        "suggested_actions": suggested_actions,
+    }
+
+
 @app.post("/api/generate-notice")
 @app.post("/generate-notice")
 def generate_notice(req: GenerateNoticeRequest):
     """
     Generates a formal Section 91 CrPC freezing notice using local Ollama AI (qwen2.5:1.5b).
-    Makes an HTTP POST request to http://localhost:11434/api/generate.
+    Supports single account freezing as well as bulk downstream syndicate network freezing.
     Falls back gracefully if Ollama is not running.
     """
     clean_account = req.account_id.strip()
     clean_bank = req.bank_name.strip()
     formatted_amount = f"{float(req.amount):,.2f}"
+    is_bulk = bool(req.is_bulk and req.connected_accounts and len(req.connected_accounts) > 0)
+    connected_list = req.connected_accounts or []
 
-    prompt = (
-        f"You are a legal assistant. Write a formal Section 91 CrPC notice to the Branch Manager "
-        f"of {clean_bank} requesting the immediate freezing of account number {clean_account} "
-        f"which has received suspected fraudulent funds totaling ${formatted_amount}. "
-        f"Keep it professional, objective, and brief. Do not invent any additional names, dates, or details."
-    )
+    if is_bulk:
+        connected_count = len(connected_list)
+        connected_summary = ", ".join(connected_list[:12])
+        if connected_count > 12:
+            connected_summary += f", and {connected_count - 12} other accounts"
+
+        prompt = (
+            f"You are a cyber forensics legal officer. Write a formal statutory Section 91 CrPC Network Freezing Order "
+            f"to the Branch Manager of {clean_bank} and all connected nodal bank officers demanding the immediate debit freeze "
+            f"of primary laundering hub account {clean_account} and all {connected_count} connected downstream mule/terminal accounts: "
+            f"{connected_summary}. Cumulative syndicate volume: ₹{formatted_amount}. Keep it formal, statutory, and concise."
+        )
+    else:
+        prompt = (
+            f"You are a legal assistant. Write a formal Section 91 CrPC notice to the Branch Manager "
+            f"of {clean_bank} requesting the immediate freezing of account number {clean_account} "
+            f"which has received suspected fraudulent funds totaling ₹{formatted_amount}. "
+            f"Keep it professional, objective, and brief. Do not invent any additional names, dates, or details."
+        )
 
     ollama_url = "http://localhost:11434/api/generate"
     ollama_payload = {
@@ -464,32 +629,64 @@ def generate_notice(req: GenerateNoticeRequest):
                     "account_id": clean_account,
                     "bank_name": clean_bank,
                     "amount": req.amount,
+                    "is_bulk": is_bulk,
+                    "connected_accounts_count": len(connected_list),
                     "source": "ollama",
                     "model": "qwen2.5:1.5b",
                 }
     except Exception as ollama_err:
         print(f"Ollama local inference unavailable or timed out ({ollama_err}), using legal fallback template.")
 
-    # Statutory Section 91 CrPC fallback template if local Ollama service is not running
-    fallback_text = (
-        f"OFFICE OF THE INVESTIGATING OFFICER\n"
-        f"CYBER CRIME POLICE STATION & FINANCIAL FRAUD INVESTIGATION CELL\n"
-        f"NOTICE UNDER SECTION 91 OF THE CODE OF CRIMINAL PROCEDURE (CrPC), 1973\n\n"
-        f"To,\n"
-        f"The Branch Manager,\n"
-        f"{clean_bank}\n\n"
-        f"SUBJECT: URGENT NOTICE UNDER SECTION 91 CrPC FOR IMMEDIATE FREEZING OF ACCOUNT NO. {clean_account}\n\n"
-        f"Sir / Madam,\n\n"
-        f"1. Whereas an ongoing investigation into cyber-enabled banking fraud reveals that fraudulent proceeds of crime totaling ${formatted_amount} have been traced directly into beneficiary Account Number {clean_account} maintained at your branch.\n\n"
-        f"2. In exercise of powers conferred under Section 91 of the Code of Criminal Procedure, 1973, you are hereby directed to:\n"
-        f"   a. Place an immediate and total debit freeze on account number {clean_account} with immediate effect.\n"
-        f"   b. Restrict all outgoing debits, ATM withdrawals, RTGS/NEFT/IMPS transfers, internet banking, and UPI channels.\n"
-        f"   c. Furnish certified copies of Account Opening Form (AOF), KYC documents, IP/MAC transaction logs, and full statement of account from inception to date within 24 hours of receipt of this notice.\n\n"
-        f"3. Compliance with this statutory order is mandatory. Failure to comply shall attract penal proceedings under Sections 175 and 188 of the Indian Penal Code, 1860.\n\n"
-        f"Yours faithfully,\n\n"
-        f"Investigating Officer\n"
-        f"Cyber Crime & Financial Forensics Cell"
-    )
+    # Statutory Section 91 CrPC fallback template
+    if is_bulk:
+        account_lines = [f"   • [PRIMARY HUB] {clean_account} ({clean_bank}) - Retained & Dispersed Volume: ₹{formatted_amount}"]
+        for idx, acc in enumerate(connected_list):
+            account_lines.append(f"   • [DOWNSTREAM NODE {idx+1}] {acc}")
+        schedule_text = "\n".join(account_lines)
+
+        fallback_text = (
+            f"OFFICE OF THE INVESTIGATING OFFICER\n"
+            f"CYBER CRIME POLICE STATION & FINANCIAL FRAUD INVESTIGATION CELL\n"
+            f"COMPREHENSIVE NOTICE UNDER SECTION 91 OF THE CODE OF CRIMINAL PROCEDURE (CrPC), 1973\n"
+            f"(STATUTORY DIRECTIVE FOR BULK SYNDICATE NETWORK DEBIT FREEZE)\n\n"
+            f"To,\n"
+            f"1. The Branch Manager, {clean_bank} (Nodal Officer for Primary Hub)\n"
+            f"2. Nodal Officers of All Connected Beneficiary Institutions Listed in Schedule Below\n\n"
+            f"SUBJECT: URGENT STATUTORY DIRECTIVE UNDER SECTION 91 CrPC FOR IMMEDIATE BULK DEBIT FREEZING OF PRIMARY LAUNDERING HUB {clean_account} AND ALL {len(connected_list)} CONNECTED BENEFICIARY ACCOUNTS\n\n"
+            f"Sir / Madam,\n\n"
+            f"1. Whereas an ongoing cyber fraud investigation into syndicated financial layering has identified an organized laundering network originating from Primary Target Hub {clean_account}, through which illicit proceeds totaling ₹{formatted_amount} have been systematically dispersed across multiple downstream mule accounts and cash-out terminals.\n\n"
+            f"2. In exercise of statutory powers conferred under Section 91 of the Code of Criminal Procedure, 1973, you are hereby ordered to immediately effectuate an unconditional, complete debit freeze on all accounts specified in the schedule below:\n\n"
+            f"SCHEDULE OF FRAUDULENT SYNDICATE ACCOUNTS TO BE FROZEN:\n"
+            f"{schedule_text}\n\n"
+            f"3. You are further commanded to:\n"
+            f"   a. Place an immediate and total debit freeze on each listed account with zero outbound dissipation.\n"
+            f"   b. Restrict all outgoing debits, ATM withdrawals, RTGS/NEFT/IMPS transfers, internet banking, POS terminals, and UPI VPA channels.\n"
+            f"   c. Furnish certified copies of Account Opening Forms (AOF), biometric/e-KYC records, IP/MAC transaction logs, and full statements of account within 24 hours of receipt of this statutory notice.\n\n"
+            f"4. Compliance with this statutory order is mandatory under law. Non-compliance shall attract penal proceedings under Sections 175 and 188 of the Indian Penal Code, 1860.\n\n"
+            f"Yours faithfully,\n\n"
+            f"Investigating Officer\n"
+            f"Cyber Crime & Financial Forensics Unit"
+        )
+    else:
+        fallback_text = (
+            f"OFFICE OF THE INVESTIGATING OFFICER\n"
+            f"CYBER CRIME POLICE STATION & FINANCIAL FRAUD INVESTIGATION CELL\n"
+            f"NOTICE UNDER SECTION 91 OF THE CODE OF CRIMINAL PROCEDURE (CrPC), 1973\n\n"
+            f"To,\n"
+            f"The Branch Manager,\n"
+            f"{clean_bank}\n\n"
+            f"SUBJECT: URGENT NOTICE UNDER SECTION 91 CrPC FOR IMMEDIATE FREEZING OF ACCOUNT NO. {clean_account}\n\n"
+            f"Sir / Madam,\n\n"
+            f"1. Whereas an ongoing investigation into cyber-enabled banking fraud reveals that fraudulent proceeds of crime totaling ₹{formatted_amount} have been traced directly into beneficiary Account Number {clean_account} maintained at your branch.\n\n"
+            f"2. In exercise of powers conferred under Section 91 of the Code of Criminal Procedure, 1973, you are hereby directed to:\n"
+            f"   a. Place an immediate and total debit freeze on account number {clean_account} with immediate effect.\n"
+            f"   b. Restrict all outgoing debits, ATM withdrawals, RTGS/NEFT/IMPS transfers, internet banking, and UPI channels.\n"
+            f"   c. Furnish certified copies of Account Opening Form (AOF), KYC documents, IP/MAC transaction logs, and full statement of account from inception to date within 24 hours of receipt of this notice.\n\n"
+            f"3. Compliance with this statutory order is mandatory. Failure to comply shall attract penal proceedings under Sections 175 and 188 of the Indian Penal Code, 1860.\n\n"
+            f"Yours faithfully,\n\n"
+            f"Investigating Officer\n"
+            f"Cyber Crime & Financial Forensics Cell"
+        )
 
     return {
         "status": "success",
@@ -497,6 +694,8 @@ def generate_notice(req: GenerateNoticeRequest):
         "account_id": clean_account,
         "bank_name": clean_bank,
         "amount": req.amount,
+        "is_bulk": is_bulk,
+        "connected_accounts_count": len(connected_list),
         "source": "legal_template",
         "model": "qwen2.5:1.5b",
     }

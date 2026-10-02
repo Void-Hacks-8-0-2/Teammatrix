@@ -29,3 +29,8 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: #94a3b8;
 }
+
+/* Custom Blue Forensics Canvas Cursor */
+.react-flow__pane {
+  cursor: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="%234f46e5" stroke="%23ffffff" stroke-width="1.5"><path d="M4 4l7.07 16.97 2.51-7.39 7.39-2.51L4 4z"/></svg>'), auto !important;
+}

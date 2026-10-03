@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom'
 import Papa from 'papaparse'
-import { jsPDF } from 'jspdf'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import NetworkGraph from './NetworkGraph'
 import Login from './Login'
+import { downloadFreezeReportPDF, getBankNameFromAccount } from './reportPdf'
 import { getAuthToken, clearOfficerSession, getOfficerUsername, getAuthHeaders } from './api'
 import {
   UploadCloud,
@@ -47,6 +48,7 @@ import {
   Layers,
   LogOut,
   User,
+  Users,
 } from 'lucide-react'
 import {
   PieChart,
@@ -350,6 +352,7 @@ export interface TraceResponse {
   total_nodes: number
   total_links: number
   total_volume: number
+  total_mules?: number
   message?: string
 }
 
@@ -817,6 +820,7 @@ function Dashboard() {
   const [isAIChatOpen, setIsAIChatOpen] = useState<boolean>(false)
   const [chatMessages, setChatMessages] = useState<AIChatMessage[]>([])
   const [chatInput, setChatInput] = useState<string>('')
+  const [refineInput, setRefineInput] = useState<string>('')
   const [isAITyping, setIsAITyping] = useState<boolean>(false)
   const chatEndRef = useRef<HTMLDivElement>(null)
 
@@ -1077,48 +1081,37 @@ function Dashboard() {
     }
   }
 
-  // Download PDF Official
+  // Download Official Evidentiary PDF (Section 91 & Transaction Ledger)
   const handleSec91DownloadPDF = () => {
-    if (!sec91EditableText || !sec91Target) return
+    if (!sec91Target) return
 
-    const doc = new jsPDF({
-      orientation: 'portrait',
-      unit: 'mm',
-      format: 'a4',
+    const cleanTarget = sec91Target.accountId.trim()
+    const allLinks = masterGraphData?.links || splitTraceData?.links || []
+    const flows = allLinks.filter((l) => {
+      const s = (l.source || '').trim()
+      return s.toLowerCase() === cleanTarget.toLowerCase() || getHop(l) === 1
     })
 
-    doc.setFont('times', 'bold')
-    doc.setFontSize(10)
-    doc.setTextColor(190, 18, 60)
-    doc.text('CONFIDENTIAL - CYBER FORENSICS CELL', 105, 14, { align: 'center' })
+    const targetOutflows = allLinks.filter((l) => (l.source || '').trim().toLowerCase() === cleanTarget.toLowerCase())
+    const effectiveFlows = targetOutflows.length > 0 ? targetOutflows : flows.length > 0 ? flows : allLinks.slice(0, 50)
 
-    doc.setFontSize(8)
-    doc.setTextColor(100, 116, 139)
-    doc.text('FINANCIAL FRAUD INVESTIGATION & ASSET FREEZING DIVISION', 105, 19, { align: 'center' })
-
-    doc.setDrawColor(203, 213, 225)
-    doc.setLineWidth(0.4)
-    doc.line(15, 22, 195, 22)
-
-    doc.setFont('times', 'normal')
-    doc.setFontSize(10)
-    doc.setTextColor(15, 23, 42)
-
-    const splitText = doc.splitTextToSize(sec91EditableText, 180)
-    let y = 30
-    const pageHeight = doc.internal.pageSize.getHeight()
-
-    for (let i = 0; i < splitText.length; i++) {
-      if (y > pageHeight - 20) {
-        doc.addPage()
-        y = 20
-      }
-      doc.text(splitText[i], 15, y)
-      y += 5.5
-    }
-
-    const safeId = sec91Target.accountId.replace(/[^a-zA-Z0-9_-]/g, '_')
-    doc.save(`Sec91_Notice_${safeId}.pdf`)
+    downloadFreezeReportPDF({
+      targetAccountId: cleanTarget,
+      targetBankName: sec91Target.bankName,
+      totalDispersalAmount: sec91Target.amount,
+      layer1Flows: effectiveFlows.map((l) => ({
+        source: l.source,
+        target: l.target,
+        amount: Number(l.amount) || 0,
+        timestamp: l.timestamp,
+        narration: l.transaction_narration || l.narration,
+        ip_address: l.ip_address,
+        device_type: l.device_type,
+        payment_mode: l.payment_mode,
+        hop: getHop(l),
+      })),
+      customNoticeText: sec91EditableText || undefined,
+    })
   }
 
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -2161,9 +2154,21 @@ function Dashboard() {
                             </span>
                           </div>
                         </div>
-                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold font-mono bg-indigo-50 text-indigo-700 border border-indigo-200">
-                          Deterministic Scoring &bull; Capped 99%
-                        </span>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="px-2.5 py-1 rounded-md text-[11px] font-bold font-mono bg-rose-50 text-rose-700 border border-rose-200 shadow-2xs flex items-center gap-1">
+                            <Users className="h-3 w-3 text-rose-600" />
+                            Total Suspected Mules: {
+                              splitTraceData?.total_mules ?? (
+                                splitTraceData?.nodes
+                                  ? Math.max(0, splitTraceData.nodes.length - 1 - splitTraceData.nodes.filter(n => n.group === -1).length)
+                                  : (selectedEntity.type === 'suspicious' ? selectedEntity.data.unique_receivers : 0)
+                              )
+                            }
+                          </span>
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold font-mono bg-indigo-50 text-indigo-700 border border-indigo-200">
+                            Deterministic Scoring &bull; Capped 99%
+                          </span>
+                        </div>
                       </div>
 
                       {/* Heuristic 1: Mule Risk Index */}
@@ -2407,11 +2412,19 @@ function Dashboard() {
               {/* RIGHT PANEL: INTERACTIVE OSINT FLOW GRAPH (CRISP WHITE CONTAINER) */}
               <div className="lg:col-span-7 flex flex-col min-h-[640px] lg:h-[calc(100vh-140px)] rounded-xl overflow-hidden shadow-sm border border-slate-200 bg-white">
                 {splitTraceData && (
-                  <div className="px-4 py-2 border-b border-slate-200 bg-slate-50/80 flex items-center justify-between z-10 shrink-0">
-                    <div className="flex items-center gap-2">
-                      <span className="h-2 w-2 rounded-full bg-emerald-500"></span>
-                      <span className="text-xs font-bold text-slate-800 font-mono">
-                        Active Graph: {splitTraceData.nodes?.length || 0} Nodes &bull; {splitTraceData.links?.length || 0} Edges
+                  <div className="px-4 py-2 border-b border-slate-200 bg-slate-50/80 flex items-center justify-between z-10 shrink-0 flex-wrap gap-2">
+                    <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-1.5">
+                        <span className="h-2 w-2 rounded-full bg-emerald-500"></span>
+                        <span className="text-xs font-bold text-slate-800 font-mono">
+                          Active Graph: {splitTraceData.nodes?.length || 0} Nodes &bull; {splitTraceData.links?.length || 0} Edges
+                        </span>
+                      </div>
+                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-rose-50 border border-rose-200 text-rose-700 text-[11px] font-mono font-bold shadow-2xs">
+                        <Users className="h-3 w-3 text-rose-600" />
+                        Total Suspected Mules: {
+                          splitTraceData.total_mules ?? Math.max(0, (splitTraceData.nodes?.length || 0) - 1 - (splitTraceData.nodes?.filter(n => n.group === -1).length || 0))
+                        }
                       </span>
                     </div>
                     <button
@@ -3273,6 +3286,12 @@ function Dashboard() {
                   <span className="text-slate-400 text-[10px] uppercase mr-1.5">Nodes:</span>
                   <span className="font-bold text-white">{masterGraphData.total_nodes}</span>
                 </div>
+                <div className="px-2.5 py-1 rounded-lg bg-rose-950/90 border border-rose-700/80 text-xs font-mono">
+                  <span className="text-rose-400 text-[10px] uppercase mr-1.5">Total Suspected Mules:</span>
+                  <span className="font-bold text-rose-200">
+                    {masterGraphData.total_mules ?? Math.max(0, (masterGraphData.nodes?.length || 0) - 1 - (masterGraphData.nodes?.filter(n => n.group === -1).length || 0))}
+                  </span>
+                </div>
                 <div className="px-2.5 py-1 rounded-lg bg-slate-800/90 border border-slate-700 text-xs font-mono">
                   <span className="text-slate-400 text-[10px] uppercase mr-1.5">Links:</span>
                   <span className="font-bold text-indigo-300">{masterGraphData.total_links}</span>
@@ -3564,7 +3583,38 @@ function Dashboard() {
                         {layer1Links.length} Transfers &bull; ₹{layer1Total.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </span>
                     </div>
-                    {openLayers.layer_1 ? <ChevronUp className="h-4 w-4 text-amber-700" /> : <ChevronDown className="h-4 w-4 text-amber-700" />}
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          if (!masterGraphData) return
+                          const targetId = masterGraphData.victim_id
+                          downloadFreezeReportPDF({
+                            targetAccountId: targetId,
+                            targetBankName: getBankNameFromAccount(targetId),
+                            totalDispersalAmount: layer1Total,
+                            layer1Flows: layer1Links.map((l) => ({
+                              source: l.source,
+                              target: l.target,
+                              amount: Number(l.amount) || 0,
+                              timestamp: l.timestamp,
+                              narration: l.transaction_narration || l.narration,
+                              ip_address: l.ip_address,
+                              device_type: l.device_type,
+                              payment_mode: l.payment_mode,
+                              hop: getHop(l),
+                            })),
+                          })
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold transition shadow-xs cursor-pointer active:scale-95"
+                        title="Download Court-Ready Official Sec 91 Freezing Order & Layer 1 Transaction Ledger PDF"
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                        <span>Export Court-Ready PDF (Sec 91 + Ledger)</span>
+                      </button>
+                      {openLayers.layer_1 ? <ChevronUp className="h-4 w-4 text-amber-700" /> : <ChevronDown className="h-4 w-4 text-amber-700" />}
+                    </div>
                   </div>
 
                   {openLayers.layer_1 && (
@@ -3891,15 +3941,26 @@ function Dashboard() {
                 >
                   {m.sender === 'ai' ? (
                     <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
                       components={{
                         p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>,
                         ul: ({ children }) => <ul className="list-disc pl-4 mb-2 space-y-1">{children}</ul>,
                         ol: ({ children }) => <ol className="list-decimal pl-4 mb-2 space-y-1">{children}</ol>,
                         li: ({ children }) => <li className="leading-relaxed">{children}</li>,
                         strong: ({ children }) => <strong className="font-bold text-slate-900">{children}</strong>,
+                        h1: ({ children }) => <h1 className="font-bold text-slate-900 text-sm mt-3 mb-1.5 pb-1 border-b border-slate-200 uppercase tracking-wide">{children}</h1>,
+                        h2: ({ children }) => <h2 className="font-bold text-slate-900 text-xs mt-2.5 mb-1 pb-0.5 border-b border-slate-100 uppercase tracking-wider">{children}</h2>,
                         h3: ({ children }) => <h3 className="font-bold text-slate-900 text-xs mt-2 mb-1 uppercase tracking-wider">{children}</h3>,
                         h4: ({ children }) => <h4 className="font-bold text-slate-900 text-[11px] mt-1.5 mb-0.5">{children}</h4>,
+                        blockquote: ({ children }) => <blockquote className="border-l-2 border-indigo-500 pl-2.5 py-1 my-2 italic text-slate-600 bg-indigo-50/40 rounded-r text-[11px]">{children}</blockquote>,
+                        table: ({ children }) => <div className="my-2.5 overflow-x-auto rounded-lg border border-slate-200 shadow-2xs"><table className="min-w-full divide-y divide-slate-200 text-[11px] text-left">{children}</table></div>,
+                        thead: ({ children }) => <thead className="bg-slate-100 text-slate-700 font-bold uppercase text-[10px] tracking-wider">{children}</thead>,
+                        tbody: ({ children }) => <tbody className="divide-y divide-slate-100 bg-white">{children}</tbody>,
+                        tr: ({ children }) => <tr className="hover:bg-slate-50/80 transition-colors">{children}</tr>,
+                        th: ({ children }) => <th className="px-2.5 py-1.5 font-bold text-slate-800">{children}</th>,
+                        td: ({ children }) => <td className="px-2.5 py-1.5 text-slate-700 font-mono whitespace-nowrap">{children}</td>,
                         code: ({ children }) => <code className="bg-slate-100 text-indigo-700 px-1 py-0.5 rounded font-mono text-[11px]">{children}</code>,
+                        hr: () => <hr className="my-2.5 border-slate-200" />,
                       }}
                     >
                       {m.text}
@@ -3932,6 +3993,40 @@ function Dashboard() {
                   </div>
                 )}
 
+                {/* Quick inline Refine suggestions for AI report messages */}
+                {m.sender === 'ai' && !m.text.startsWith('System idle') && !m.text.startsWith('Investigation notice') && (
+                  <div className="mt-2 flex items-center gap-1.5 text-[10px] text-slate-500 max-w-[88%] flex-wrap">
+                    <span className="font-semibold text-slate-400 flex items-center gap-1">
+                      <Sparkles className="h-3 w-3 text-indigo-500" />
+                      Refine:
+                    </span>
+                    <button
+                      type="button"
+                      disabled={isAITyping}
+                      onClick={() => handleSendChatMessage('Make this report more formal and structured as an official Police Case Diary under Section 154 / 91 CrPC')}
+                      className="px-2 py-0.5 rounded-md bg-white hover:bg-indigo-50 text-indigo-700 font-semibold border border-slate-200 transition cursor-pointer active:scale-95 shadow-2xs"
+                    >
+                      Formal FIR
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isAITyping}
+                      onClick={() => handleSendChatMessage('Refine this report to explicitly specify the Total Suspected Mules count and Hop dispersal topology')}
+                      className="px-2 py-0.5 rounded-md bg-white hover:bg-indigo-50 text-indigo-700 font-semibold border border-slate-200 transition cursor-pointer active:scale-95 shadow-2xs"
+                    >
+                      Mule Count
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isAITyping}
+                      onClick={() => handleSendChatMessage('Convert this analysis into a clean Markdown table summarizing all key entities, amounts, and roles')}
+                      className="px-2 py-0.5 rounded-md bg-white hover:bg-indigo-50 text-indigo-700 font-semibold border border-slate-200 transition cursor-pointer active:scale-95 shadow-2xs"
+                    >
+                      Markdown Table
+                    </button>
+                  </div>
+                )}
+
                 <span className="text-[9px] text-slate-400 mt-1 font-mono px-1">
                   {m.timestamp}
                 </span>
@@ -3946,6 +4041,89 @@ function Dashboard() {
             )}
             <div ref={chatEndRef} />
           </div>
+
+          {/* Interactive AI Report Refinement Section */}
+          {chatMessages.some((m) => m.sender === 'ai' && !m.text.startsWith('System idle') && !m.text.startsWith('Investigation notice')) && (
+            <div className="p-3 bg-indigo-50/70 border-t border-indigo-100 flex flex-col gap-2 shrink-0">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  <Sparkles className="h-3.5 w-3.5 text-indigo-600" />
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-900 font-mono">
+                    Refine Investigation Report
+                  </span>
+                </div>
+                <span className="text-[9px] text-indigo-600 font-semibold font-mono bg-indigo-100/80 px-2 py-0.5 rounded-full border border-indigo-200">
+                  Multi-Turn Context Active
+                </span>
+              </div>
+
+              {/* Quick Refinement Suggestion Chips */}
+              <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+                <button
+                  type="button"
+                  disabled={isAITyping}
+                  onClick={() => handleSendChatMessage('Make the report more formal and structured as an official Police Case Diary under Section 154 / 91 CrPC')}
+                  className="shrink-0 px-2 py-1 rounded-md bg-white hover:bg-indigo-100/80 text-indigo-800 text-[10px] font-semibold border border-indigo-200 shadow-2xs transition cursor-pointer"
+                >
+                  + Police FIR Format
+                </button>
+                <button
+                  type="button"
+                  disabled={isAITyping}
+                  onClick={() => handleSendChatMessage('Refine the report to explicitly include the Total Suspected Mules count, Hop distribution, and Fan-Out topology metrics')}
+                  className="shrink-0 px-2 py-1 rounded-md bg-white hover:bg-indigo-100/80 text-indigo-800 text-[10px] font-semibold border border-indigo-200 shadow-2xs transition cursor-pointer"
+                >
+                  + Include Mule Count & Topology
+                </button>
+                <button
+                  type="button"
+                  disabled={isAITyping}
+                  onClick={() => handleSendChatMessage('Summarize the report into 3 concise, high-priority bullet points with recommended immediate actions')}
+                  className="shrink-0 px-2 py-1 rounded-md bg-white hover:bg-indigo-100/80 text-indigo-800 text-[10px] font-semibold border border-indigo-200 shadow-2xs transition cursor-pointer"
+                >
+                  + 3 Actionable Bullet Points
+                </button>
+                <button
+                  type="button"
+                  disabled={isAITyping}
+                  onClick={() => handleSendChatMessage('Convert the suspect accounts, hops, wash ratios, and transaction amounts into a clean Markdown table')}
+                  className="shrink-0 px-2 py-1 rounded-md bg-white hover:bg-indigo-100/80 text-indigo-800 text-[10px] font-semibold border border-indigo-200 shadow-2xs transition cursor-pointer"
+                >
+                  + Markdown Table Format
+                </button>
+              </div>
+
+              {/* Dedicated Iterative Refinement Input Field */}
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault()
+                  if (!refineInput.trim() || isAITyping) return
+                  const instruction = refineInput.trim()
+                  setRefineInput('')
+                  handleSendChatMessage(`Refine report: ${instruction}`)
+                }}
+                className="flex items-center gap-1.5"
+              >
+                <input
+                  type="text"
+                  value={refineInput}
+                  onChange={(e) => setRefineInput(e.target.value)}
+                  disabled={isAITyping}
+                  placeholder='Refine report (e.g., "make it more formal", "add Section 91 notice details")...'
+                  className="flex-1 bg-white border border-indigo-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 placeholder:text-indigo-400 focus:outline-indigo-600 focus:ring-1 focus:ring-indigo-600 font-sans shadow-2xs"
+                />
+                <button
+                  type="submit"
+                  disabled={!refineInput.trim() || isAITyping}
+                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold transition disabled:opacity-50 cursor-pointer shadow-xs active:scale-95 shrink-0 flex items-center gap-1"
+                  title="Apply refinement to previous report"
+                >
+                  <Sparkles className="h-3 w-3" />
+                  <span>Refine</span>
+                </button>
+              </form>
+            </div>
+          )}
 
           {/* Quick Prompts Strip (Only active when data is ingested) */}
           {totalRows > 0 && (

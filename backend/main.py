@@ -445,6 +445,47 @@ def ai_chat(req: AIChatRequest, officer: dict = Depends(get_current_officer)):
     # Check for FIR / Case Diary generation intent
     is_fir_intent = any(k in msg.lower() for k in ["fir", "case diary", "police diary", "crpc", "154", "investigation diary", "case record", "generate fir"])
 
+    # Check for iterative refinement intent (e.g. "make it more formal", "include the total mule count")
+    is_refine_intent = any(k in msg.lower() for k in [
+        "refine", "make it", "rewrite", "more formal", "shorter", "bullet points",
+        "include", "add section", "update report", "modify", "simplify", "elaborate",
+        "mule count", "tone", "formalize", "concise", "expand", "legalize"
+    ])
+
+    # If refinement intent and there is previous assistant context in conversation history:
+    if is_refine_intent and any(item.get("role") == "assistant" for item in ollama_history):
+        refine_system = (
+            "You are an AI Cyber Forensics Investigator and Legal Assistant. "
+            "The user is asking to iteratively refine, modify, or rewrite a previous forensic report, FIR, or investigative case diary from the conversation history. "
+            "Carefully review the previous assistant report in the conversation history, apply the user's latest instruction (e.g., make it more formal, include the total suspected mule count, format into bullet points or tables, adjust tone), "
+            "and output the complete, updated, refined version in rich Markdown formatting (using bold headers, bullet lists, and tables where appropriate). "
+            "Ensure all figures, accounts, and forensic facts remain accurate."
+        )
+        chat_payload = [{"role": "system", "content": refine_system}] + ollama_history
+        reply = query_ollama_chat(chat_payload, timeout=25)
+        if reply:
+            return {
+                "status": "success",
+                "account_id": target_account,
+                "response": reply,
+                "summary": None,
+                "source": "ollama (qwen2.5:1.5b)",
+                "suggested_actions": [
+                    {
+                        "type": "freeze_notice",
+                        "label": f"Draft Sec 91 Notice ({target_account or 'Target Hub'})",
+                        "account_id": target_account or "TARGET",
+                        "bank_name": "Beneficiary Bank",
+                        "amount": 50000.0,
+                    },
+                    {
+                        "type": "trace_graph",
+                        "label": f"View 4-Hop Dispersal Graph ({target_account or 'Target Hub'})",
+                        "account_id": target_account or "TARGET",
+                    }
+                ]
+            }
+
     # Conversational routing guard:
     # If no specific account ID, no scan request, and not FIR generation,
     # pass dynamically to local Ollama /api/chat or natural fallback

@@ -16,7 +16,7 @@ import {
 import type { Node, Edge, NodeProps, EdgeProps } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import ELK from 'elkjs/lib/elk.bundled.js'
-import { jsPDF } from 'jspdf'
+import { downloadFreezeReportPDF } from './reportPdf'
 
 const elk = new ELK()
 
@@ -1135,51 +1135,34 @@ function NetworkGraphInner({
     [normalizedLinks]
   )
 
-  // PHASE 4: PDF EXPORT INTEGRATION USING jsPDF
+  // PHASE 4: OFFICIAL EVIDENTIARY PDF EXPORT (SEC 91 & TRANSACTION LEDGER)
   const handleDownloadPDF = () => {
-    if (!editableNoticeText || !activeNoticeTarget) return
+    if (!activeNoticeTarget) return
 
-    const doc = new jsPDF({
-      orientation: 'portrait',
-      unit: 'mm',
-      format: 'a4',
+    const cleanTarget = cleanId(activeNoticeTarget.accountId)
+    // Extract Layer 1 flows: direct outbound transfers from target account or hop === 1
+    const targetOutflows = normalizedLinks.filter((l) => cleanId(l.source) === cleanTarget)
+    const l1Links = normalizedLinks.filter((l) => cleanId(l.source) === cleanTarget || l.hop === 1 || l.hop_level === 1)
+    const effectiveFlows =
+      targetOutflows.length > 0 ? targetOutflows : l1Links.length > 0 ? l1Links : normalizedLinks.slice(0, 50)
+
+    downloadFreezeReportPDF({
+      targetAccountId: cleanTarget,
+      targetBankName: activeNoticeTarget.bankName,
+      totalDispersalAmount: activeNoticeTarget.amount,
+      layer1Flows: effectiveFlows.map((l) => ({
+        source: cleanId(l.source),
+        target: cleanId(l.target),
+        amount: Number(l.amount) || 0,
+        timestamp: l.timestamp,
+        narration: l.transaction_narration || l.narration,
+        ip_address: l.ip_address,
+        device_type: l.device_type,
+        payment_mode: l.payment_mode,
+        hop: l.hop,
+      })),
+      customNoticeText: editableNoticeText || undefined,
     })
-
-    doc.setFont('times', 'bold')
-    doc.setFontSize(10)
-    doc.setTextColor(190, 18, 60)
-    doc.text('CONFIDENTIAL - CYBER FORENSICS CELL', 105, 14, { align: 'center' })
-
-    doc.setFontSize(8)
-    doc.setTextColor(100, 116, 139)
-    doc.text('FINANCIAL FRAUD INVESTIGATION & ASSET FREEZING DIVISION', 105, 19, { align: 'center' })
-
-    doc.setDrawColor(203, 213, 225)
-    doc.setLineWidth(0.4)
-    doc.line(15, 22, 195, 22)
-
-    doc.setFont('times', 'normal')
-    doc.setFontSize(10.5)
-    doc.setTextColor(15, 23, 42)
-
-    const splitText = doc.splitTextToSize(editableNoticeText, 175)
-    let cursorY = 30
-    const lineHeight = 5.2
-    const pageHeight = 275
-
-    for (let i = 0; i < splitText.length; i++) {
-      if (cursorY > pageHeight) {
-        doc.addPage()
-        cursorY = 20
-      }
-      doc.text(splitText[i], 18, cursorY)
-      cursorY += lineHeight
-    }
-
-    const fileName = activeNoticeTarget.isBulk
-      ? `Sec91_BulkNotice_${cleanId(activeNoticeTarget.accountId)}.pdf`
-      : `Sec91_Notice_${cleanId(activeNoticeTarget.accountId)}.pdf`
-    doc.save(fileName)
   }
 
   // Copy notice text to clipboard
@@ -1912,22 +1895,33 @@ function NetworkGraphInner({
       <div className="relative flex-1 w-full h-full min-h-[600px] overflow-hidden bg-slate-50">
         {/* HUD TELEMETRY OVERLAY */}
         <div className="absolute top-3 left-3 z-20 pointer-events-none flex flex-col gap-1.5 font-mono text-[11px]">
-          <div className="bg-white/95 backdrop-blur-md border border-slate-200 px-3 py-2 rounded-xl shadow-md flex items-center gap-3">
-            <div className="flex items-center gap-1.5 text-slate-700">
-              <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
-              <span className="font-semibold text-emerald-700">{visibleNodes.length}</span>
-              <span className="text-slate-500 text-[10px]">Nodes</span>
-            </div>
-            <span className="text-slate-300">|</span>
-            <div className="flex items-center gap-1.5 text-slate-700">
-              <span className="font-semibold text-indigo-600">{filteredLinks.length}</span>
-              <span className="text-slate-500 text-[10px]">Flows</span>
-            </div>
-            <span className="text-slate-300">|</span>
-            <div className="flex items-center gap-1 text-emerald-700 font-bold">
-              <span>₹{visibleVolume.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-            </div>
-          </div>
+          {(() => {
+            const feederNodesCount = visibleNodes.filter((n) => n.group === -1).length
+            const totalSuspectedMules = Math.max(0, visibleNodes.length - 1 - feederNodesCount)
+            return (
+              <div className="bg-white/95 backdrop-blur-md border border-slate-200 px-3 py-2 rounded-xl shadow-md flex items-center gap-3">
+                <div className="flex items-center gap-1.5 text-slate-700">
+                  <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                  <span className="font-semibold text-emerald-700">{visibleNodes.length}</span>
+                  <span className="text-slate-500 text-[10px]">Nodes</span>
+                </div>
+                <span className="text-slate-300">|</span>
+                <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 font-bold">
+                  <ShieldAlert className="h-3.5 w-3.5 text-rose-500" />
+                  <span>Total Suspected Mules: {totalSuspectedMules}</span>
+                </div>
+                <span className="text-slate-300">|</span>
+                <div className="flex items-center gap-1.5 text-slate-700">
+                  <span className="font-semibold text-indigo-600">{filteredLinks.length}</span>
+                  <span className="text-slate-500 text-[10px]">Flows</span>
+                </div>
+                <span className="text-slate-300">|</span>
+                <div className="flex items-center gap-1 text-emerald-700 font-bold">
+                  <span>₹{visibleVolume.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                </div>
+              </div>
+            )
+          })()}
 
           <div className="bg-white/95 backdrop-blur-md border border-slate-200 px-3 py-1.5 rounded-xl shadow-md flex items-center gap-2 text-[10px] text-slate-600">
             <Clock className="h-3 w-3 text-slate-400" />

@@ -962,6 +962,8 @@ def trace_victim_network(victim_id: str) -> Dict[str, Any]:
             "layer_4": sum(1 for n in nodes if n["group"] == 4),
         }
 
+        total_mules = max(0, len(nodes) - 1 - layer_summary["source_of_funds"])
+
         return {
             "status": "success",
             "victim_id": clean_id,
@@ -969,6 +971,7 @@ def trace_victim_network(victim_id: str) -> Dict[str, Any]:
             "links": links,
             "layer_summary": layer_summary,
             "total_nodes": len(nodes),
+            "total_mules": total_mules,
             "total_links": len(links),
             "total_volume": round(total_volume, 2),
         }

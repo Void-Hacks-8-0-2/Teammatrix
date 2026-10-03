@@ -2,14 +2,16 @@ import os
 import shutil
 import tempfile
 import traceback
-from typing import Optional, List
+from typing import Optional, List, Dict
 from datetime import datetime
 from pydantic import BaseModel
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile, Depends, status, Request
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 import database
+import auth
 
 app = FastAPI(
     title="Financial Fraud Network Tracer API",
@@ -17,7 +19,7 @@ app = FastAPI(
     version="1.2.0",
 )
 
-# Configure CORS for local development
+# Configure CORS for local development - explicitly allowing Authorization header
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -31,14 +33,86 @@ app.add_middleware(
     allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*", "Authorization", "Content-Type", "Accept"],
+    expose_headers=["*"],
 )
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login")
+
+
+def get_current_officer(token: str = Depends(oauth2_scheme)):
+    """
+    Enforces 100% offline JWT authentication for Law Enforcement officers.
+    Validates cryptographic signature and checks user existence in officers.db.
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Unauthorized. Valid Law Enforcement officer session required.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    payload = auth.decode_access_token(token)
+    if not payload:
+        raise credentials_exception
+    username: str = payload.get("sub")
+    if not username:
+        raise credentials_exception
+    user = auth.get_user_by_username(username)
+    if not user:
+        raise credentials_exception
+    return {"id": user["id"], "username": user["username"]}
 
 
 @app.on_event("startup")
 def startup_event():
-    """Ensure DuckDB schema is initialized on server startup."""
+    """Ensure DuckDB schema and SQLite auth schema are initialized on server startup."""
     database.init_db()
+    auth.init_auth_db()
+
+
+@app.post("/api/login")
+def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    """
+    Offline Law Enforcement Officer Login Endpoint.
+    Accepts OAuth2 standard form data (username & password).
+    Verifies credentials against local officers.db and issues signed JWT.
+    """
+    username = form_data.username.strip()
+    password = form_data.password
+
+    if not username or not password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Both username and password are required.",
+        )
+
+    user = auth.get_user_by_username(username)
+    if not user or not auth.verify_password(password, user["hashed_password"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Officer Credentials. Access Denied.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    access_token = auth.create_access_token(
+        data={"sub": user["username"], "role": "cyber_crime_investigator"}
+    )
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "officer": user["username"],
+        "role": "Cyber Crime Investigating Officer",
+    }
+
+
+@app.get("/api/me")
+def get_current_user_profile(officer: dict = Depends(get_current_officer)):
+    """Returns profile information for the authenticated officer."""
+    return {
+        "status": "authenticated",
+        "officer": officer["username"],
+        "role": "Cyber Crime Investigating Officer",
+    }
 
 
 @app.get("/")
@@ -49,6 +123,7 @@ def read_root():
         "version": "1.2.0",
         "endpoints": {
             "health": "/api/health",
+            "login": "/api/login",
             "upload": "/api/upload",
             "transactions": "/api/transactions?page=1&limit=50",
             "trace": "/api/trace/{victim_id}",
@@ -72,7 +147,7 @@ def health_check():
 
 
 @app.get("/api/stats")
-def get_stats():
+def get_stats(officer: dict = Depends(get_current_officer)):
     """Returns current transaction status and high-level metrics."""
     info = database.get_table_info()
     return {
@@ -89,6 +164,7 @@ def get_suspicious(
     page: int = Query(1, ge=1, description="Page number (1-indexed)"),
     limit: int = Query(50, ge=1, le=500, description="Items per page"),
     search: Optional[str] = Query(None, description="Optional search filter for account, device, or IP"),
+    officer: dict = Depends(get_current_officer),
 ):
     """
     Auto-detects flagged suspicious money laundering hub accounts with pagination.
@@ -113,6 +189,7 @@ def get_suspicious(
 def get_transactions(
     page: int = Query(1, ge=1, description="Page number (1-indexed)"),
     limit: int = Query(50, ge=1, le=500, description="Items per page"),
+    officer: dict = Depends(get_current_officer),
 ):
     """
     Returns paginated transactions from DuckDB using LIMIT and OFFSET.
@@ -135,7 +212,7 @@ def get_transactions(
 
 @app.get("/api/trace/{victim_id}")
 @app.get("/trace/{victim_id}")
-def trace_victim(victim_id: str):
+def trace_victim(victim_id: str, officer: dict = Depends(get_current_officer)):
     """
     Executes 4-hop network traversal from victim/suspect account to discover money muling layers.
     Returns strictly formatted graph payload:
@@ -171,7 +248,7 @@ def trace_victim(victim_id: str):
 
 
 @app.get("/api/account/{account_id}")
-def get_account_summary(account_id: str):
+def get_account_summary(account_id: str, officer: dict = Depends(get_current_officer)):
     """
     Returns full forensic summary and threat categorization for any account.
     Accounts with score < 70 are categorized as Normal or Feeder (Victim).
@@ -187,7 +264,7 @@ def get_account_summary(account_id: str):
 
 @app.post("/api/upload")
 @app.post("/upload")
-async def upload_csv(file: UploadFile = File(...)):
+async def upload_csv(file: UploadFile = File(...), officer: dict = Depends(get_current_officer)):
     """
     Accepts CSV file upload, saves temporarily, executes DuckDB read_csv_auto()
     with dynamic column standardization, deletes temp file, and returns row count and metadata.
@@ -246,7 +323,7 @@ async def upload_csv(file: UploadFile = File(...)):
 
 @app.delete("/api/reset")
 @app.post("/api/reset")
-def reset_database():
+def reset_database(officer: dict = Depends(get_current_officer)):
     """Clear Space: Drops the transactions table and caches to free up memory."""
     try:
         return database.reset_db()
@@ -275,7 +352,7 @@ class AIChatRequest(BaseModel):
 
 
 @app.get("/api/top-suspect")
-def get_top_suspect():
+def get_top_suspect(officer: dict = Depends(get_current_officer)):
     """
     Returns the highest risk suspect account from DuckDB for proactive AI scanning.
     """
@@ -312,7 +389,7 @@ def query_ollama_chat(messages: List[Dict[str, str]], timeout: int = 15) -> Opti
 
 
 @app.post("/api/ai-chat")
-def ai_chat(req: AIChatRequest):
+def ai_chat(req: AIChatRequest, officer: dict = Depends(get_current_officer)):
     """
     Interactive Cyber Forensics AI Chat Assistant with full multi-turn conversational memory.
     Supports Ollama (qwen2.5:1.5b) /api/chat format.
@@ -651,7 +728,7 @@ def ai_chat(req: AIChatRequest):
 
 @app.get("/api/ai/global-scan")
 @app.post("/api/ai/global-scan")
-def ai_global_scan():
+def ai_global_scan(officer: dict = Depends(get_current_officer)):
     """
     Executes a dataset-wide macro analysis across DuckDB transactions ledger.
     Aggregates volume, row count, unique accounts, top suspect hubs, and structuring anomalies.
@@ -752,7 +829,7 @@ def ai_global_scan():
 
 @app.post("/api/generate-notice")
 @app.post("/generate-notice")
-def generate_notice(req: GenerateNoticeRequest):
+def generate_notice(req: GenerateNoticeRequest, officer: dict = Depends(get_current_officer)):
     """
     Generates a formal Section 91 CrPC freezing notice using local Ollama AI (qwen2.5:1.5b).
     Supports single account freezing as well as bulk downstream syndicate network freezing.

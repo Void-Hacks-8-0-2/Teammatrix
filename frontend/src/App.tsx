@@ -1,8 +1,11 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react'
+import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom'
 import Papa from 'papaparse'
 import { jsPDF } from 'jspdf'
 import ReactMarkdown from 'react-markdown'
 import NetworkGraph from './NetworkGraph'
+import Login from './Login'
+import { getAuthToken, clearOfficerSession, getOfficerUsername, getAuthHeaders } from './api'
 import {
   UploadCloud,
   AlertCircle,
@@ -42,6 +45,8 @@ import {
   ArrowUpRight,
   Sparkles,
   Layers,
+  LogOut,
+  User,
 } from 'lucide-react'
 import {
   PieChart,
@@ -712,7 +717,24 @@ function computeLocalTrace(accountId: string, rows: TransactionRow[]): TraceResp
   }
 }
 
-export default function App() {
+function Dashboard() {
+  const navigate = useNavigate()
+  const [officerUsername] = useState<string>(() => getOfficerUsername())
+
+  useEffect(() => {
+    const handleUnauthorized = () => {
+      clearOfficerSession()
+      navigate('/login', { replace: true })
+    }
+    window.addEventListener('auth:unauthorized', handleUnauthorized)
+    return () => window.removeEventListener('auth:unauthorized', handleUnauthorized)
+  }, [navigate])
+
+  const handleLogout = () => {
+    clearOfficerSession()
+    navigate('/login', { replace: true })
+  }
+
   // Backend & Connection status
   const [backendStatus, setBackendStatus] = useState<'checking' | 'connected' | 'disconnected'>('checking')
 
@@ -859,7 +881,7 @@ export default function App() {
     }
 
     try {
-      const res = await fetch('/api/top-suspect')
+      const res = await fetch('/api/top-suspect', { headers: getAuthHeaders() })
       let topAcc: string | null = null
       let topScore = 0
       let topIn = 0
@@ -946,7 +968,10 @@ export default function App() {
       let data: any = null
       const lower = textToSend.toLowerCase()
       if (lower.includes('full dataset') || lower.includes('global scan') || lower.includes('entire dataset')) {
-        const scanRes = await fetch('/api/ai/global-scan', { method: 'POST' })
+        const scanRes = await fetch('/api/ai/global-scan', {
+          method: 'POST',
+          headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        })
         if (scanRes.ok) {
           const scanData = await scanRes.json()
           data = {
@@ -971,7 +996,7 @@ export default function App() {
 
         const res = await fetch('/api/ai-chat', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({
             message: textToSend.trim(),
             messages: historyPayload,
@@ -1034,7 +1059,7 @@ export default function App() {
     try {
       const res = await fetch('/api/generate-notice', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           account_id: cleanAcc,
           bank_name: cleanBank,
@@ -1109,7 +1134,7 @@ export default function App() {
       if (search.trim()) {
         queryParams.append('search', search.trim())
       }
-      const res = await fetch(`/api/suspicious?${queryParams.toString()}`)
+      const res = await fetch(`/api/suspicious?${queryParams.toString()}`, { headers: getAuthHeaders() })
       if (res.ok) {
         const json: PaginatedSuspicious = await res.json()
         setSuspiciousData(json)
@@ -1136,7 +1161,7 @@ export default function App() {
   const fetchPageFromServer = async (page: number, limit: number = pageSize) => {
     setIsLoadingPage(true)
     try {
-      const res = await fetch(`/api/transactions?page=${page}&limit=${limit}`)
+      const res = await fetch(`/api/transactions?page=${page}&limit=${limit}`, { headers: getAuthHeaders() })
       if (res.ok) {
         const data: PaginatedTransactions = await res.json()
         setTransactions(data)
@@ -1177,7 +1202,7 @@ export default function App() {
       const res = await fetch('/api/health')
       if (res.ok) {
         setBackendStatus('connected')
-        const statsRes = await fetch('/api/stats')
+        const statsRes = await fetch('/api/stats', { headers: getAuthHeaders() })
         if (statsRes.ok) {
           const stats = await statsRes.json()
           if (stats.transactions_loaded && stats.row_count > 0) {
@@ -1198,7 +1223,7 @@ export default function App() {
             fetchPageFromServer(1, pageSize)
 
             try {
-              const broaderRes = await fetch('/api/suspicious?page=1&limit=500')
+              const broaderRes = await fetch('/api/suspicious?page=1&limit=500', { headers: getAuthHeaders() })
               if (broaderRes.ok) {
                 const broaderJson: PaginatedSuspicious = await broaderRes.json()
                 setSuspiciousAccountSet((prevSet) => {
@@ -1332,6 +1357,7 @@ export default function App() {
     try {
       const response = await fetch('/api/upload', {
         method: 'POST',
+        headers: getAuthHeaders(),
         body: formData,
       })
 
@@ -1349,7 +1375,7 @@ export default function App() {
 
       // 2. Seed up to 500 suspicious accounts into lookup set for All Data table cross-referencing
       try {
-        const broaderRes = await fetch('/api/suspicious?page=1&limit=500')
+        const broaderRes = await fetch('/api/suspicious?page=1&limit=500', { headers: getAuthHeaders() })
         if (broaderRes.ok) {
           const broaderJson: PaginatedSuspicious = await broaderRes.json()
           setSuspiciousAccountSet((prevSet) => {
@@ -1383,7 +1409,7 @@ export default function App() {
   const handleClearSpace = async () => {
     setIsClearingSpace(true)
     try {
-      const res = await fetch('/api/reset', { method: 'DELETE' })
+      const res = await fetch('/api/reset', { method: 'DELETE', headers: getAuthHeaders() })
       if (res.ok) {
         setTransactions(null)
         setLocalBuffer([])
@@ -1433,7 +1459,7 @@ export default function App() {
     setShowTraceModal(true)
 
     try {
-      const res = await fetch(`/api/trace/${encodeURIComponent(cleanId)}`)
+      const res = await fetch(`/api/trace/${encodeURIComponent(cleanId)}`, { headers: getAuthHeaders() })
       if (!res.ok) {
         const errJson = await res.json().catch(() => ({}))
         throw new Error(errJson.detail || `Trace request failed with status ${res.status}`)
@@ -1466,7 +1492,7 @@ export default function App() {
     setSplitTraceError(null)
 
     try {
-      const res = await fetch(`/api/trace/${encodeURIComponent(cleanId)}`)
+      const res = await fetch(`/api/trace/${encodeURIComponent(cleanId)}`, { headers: getAuthHeaders() })
       if (res.ok) {
         const data: TraceResponse = await res.json()
         setSplitTraceData(data)
@@ -1681,6 +1707,23 @@ export default function App() {
               title="Refresh engine state"
             >
               <RefreshCw className="h-3.5 w-3.5" />
+            </button>
+
+            {/* Authenticated Officer Badge */}
+            <div className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-950/70 border border-indigo-800/60 text-xs text-indigo-300 font-mono shadow-xs">
+              <User className="h-3.5 w-3.5 text-cyan-400" />
+              <span className="font-semibold">{officerUsername}</span>
+            </div>
+
+            {/* Clean Logout Button */}
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-rose-950/40 border border-slate-700 hover:border-rose-700/60 text-slate-300 hover:text-rose-300 text-xs font-semibold transition-all shadow-xs cursor-pointer active:scale-95"
+              title="Log out of officer session"
+            >
+              <LogOut className="h-3.5 w-3.5 text-rose-400" />
+              <span className="hidden md:inline">Logout</span>
             </button>
           </div>
         </div>
@@ -4122,3 +4165,30 @@ export default function App() {
     </div>
   )
 }
+
+function ProtectedRoute({ children }: { children: React.ReactNode }) {
+  const token = getAuthToken()
+  if (!token) {
+    return <Navigate to="/login" replace />
+  }
+  return <>{children}</>
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route
+          path="/*"
+          element={
+            <ProtectedRoute>
+              <Dashboard />
+            </ProtectedRoute>
+          }
+        />
+      </Routes>
+    </BrowserRouter>
+  )
+}
+

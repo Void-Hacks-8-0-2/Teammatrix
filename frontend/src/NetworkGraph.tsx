@@ -1100,9 +1100,15 @@ function NetworkGraphInner({
       setCopiedNotice(false)
 
       try {
+        const token = sessionStorage.getItem('officer_token')
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+        if (token) {
+          headers['Authorization'] = `Bearer ${token}`
+        }
+
         const res = await fetch('/api/generate-notice', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({
             account_id: cleanTarget,
             bank_name: targetBank,

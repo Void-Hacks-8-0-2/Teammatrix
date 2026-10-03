@@ -148,6 +148,20 @@ python -m uvicorn main:app --host 127.0.0.1 --port 8000
 
 ---
 
+### Step 2.5: Provision Officer Accounts (Offline CLI)
+Because this is a law enforcement tool, there is no public signup page. Accounts are provisioned strictly via terminal:
+```bash
+# In the backend directory:
+python add_officer.py
+# (Or pass credentials directly)
+python add_officer.py officer_admin "Cyber@Cell2026"
+```
+* Pre-configured evaluation account:
+  * **Username:** `officer_admin`
+  * **Password:** `Cyber@Cell2026`
+
+---
+
 ### Step 3: Start the React Frontend
 In a third terminal window, navigate to the `frontend` directory and start the Vite dev server:
 ```bash
@@ -163,6 +177,8 @@ Open your browser and navigate to:
 ```
 http://localhost:5173
 ```
+Log in using your provisioned officer credentials to access the investigative workbench.
+
 
 ---
 
